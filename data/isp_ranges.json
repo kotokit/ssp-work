@@ -1,0 +1,20 @@
+[
+  { "isp": "Comcast Cable", "metro": "US/Northeast", "cidr": "73.0.0.0/8" },
+  { "isp": "Comcast Cable", "metro": "US/Boston", "cidr": "24.60.0.0/14" },
+  { "isp": "Comcast Cable", "metro": "US/national", "cidr": "98.192.0.0/13" },
+  { "isp": "Comcast Cable", "metro": "US/national", "cidr": "50.128.0.0/9" },
+  { "isp": "Charter Spectrum", "metro": "US/national", "cidr": "71.64.0.0/11" },
+  { "isp": "Charter Spectrum", "metro": "US/NewYork", "cidr": "24.24.0.0/16" },
+  { "isp": "Charter Spectrum", "metro": "US/national", "cidr": "97.64.0.0/12" },
+  { "isp": "AT&T Internet", "metro": "US/national", "cidr": "99.0.0.0/9" },
+  { "isp": "AT&T Internet", "metro": "US/national", "cidr": "108.64.0.0/11" },
+  { "isp": "AT&T U-verse", "metro": "US/Dallas", "cidr": "76.192.0.0/10" },
+  { "isp": "Verizon Fios", "metro": "US/national", "cidr": "72.64.0.0/11" },
+  { "isp": "Verizon Fios", "metro": "US/NewJersey", "cidr": "71.160.0.0/11" },
+  { "isp": "Cox Communications", "metro": "US/national", "cidr": "98.160.0.0/13" },
+  { "isp": "Cox Communications", "metro": "US/Phoenix", "cidr": "68.96.0.0/12" },
+  { "isp": "CenturyLink/Lumen", "metro": "US/national", "cidr": "75.160.0.0/12" },
+  { "isp": "Frontier", "metro": "US/national", "cidr": "74.192.0.0/11" },
+  { "isp": "T-Mobile US (LTE)", "metro": "US/mobile", "cidr": "172.56.0.0/14" },
+  { "isp": "Optimum/Altice", "metro": "US/NewYork", "cidr": "67.80.0.0/12" }
+]

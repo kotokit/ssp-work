@@ -1,0 +1,12 @@
+{
+  "name": "ssp-work",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Local SSP integration simulator for the ADX exchange: onboarded supply partner that relays OpenRTB auction requests (varied UA + US residential IPs) and fires the sealed impression pixel, so the full supply funnel (request -> auction -> win -> impression) is exercised end to end.",
+  "scripts": {
+    "pool": "node src/ippool.mjs",
+    "server": "node src/ssp-server.mjs",
+    "once": "node src/ssp-server.mjs --count 1 --verbose"
+  }
+}

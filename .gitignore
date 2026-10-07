@@ -1,0 +1,9 @@
+node_modules/
+data/ip_pool.json
+*.log
+config/*.local.json
+.env
+config/supply-key.txt
+config/config.json
+.idea/
+.DS_Store
