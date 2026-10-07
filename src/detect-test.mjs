@@ -15,50 +15,67 @@ const ctx = {
   residentialRanges: ranges.residential,
   datacenterRanges: ranges.datacenter,
   authorized: {
-    // Every test seller is onboarded, so unauthorized_seller should NOT fire —
-    // isolating the IP/schedule signals as the thing being measured.
-    publishers: new Set(['TEST-FRAUD-SELLER', 'TEST-HONEST-SELLER', 'TEST-DC-SELLER', 'TEST-MISMATCH-SELLER']),
+    // Every test seller is onboarded (including the rotated sub-ids), so
+    // unauthorized_seller should NOT fire — isolating the other signals.
+    publishers: new Set([
+      'TEST-FRAUD-SELLER', 'TEST-HONEST-SELLER', 'TEST-DC-SELLER',
+      'TEST-MISMATCH-SELLER', 'TEST-ZEROIFA-SELLER', 'TEST-REUSE-SELLER',
+      'TEST-SCHAIN-SELLER', 'TEST-BUNDLE-SELLER', 'TEST-IPV6-DC-SELLER', 'TEST-BOGON-SELLER',
+      ...Array.from({ length: 60 }, (_, k) => `ROTATE-${k}`),
+    ]),
     asi: new Set(['test-ssp.example']),
   },
 };
 
-const report = analyze(events, ctx);
-const codesFor = (seller) =>
-  (report.bySeller.find((s) => s.seller === seller)?.signals ?? []).map((s) => `${s.code}:${s.level}`);
+const byPublisher = analyze(events, ctx); // dimension: publisher (default)
+const byBundle = analyze(events, ctx, { dimension: 'bundle' });
 
-// Expected outcome per seller. Note the headline finding: the residential
-// fraud pattern produces ONLY flags (schedule_seller), never a block — exactly
-// the "servable-but-flagged" gap PLAN.md predicts.
+const codesIn = (report, key) =>
+  (report.groups.find((g) => g.key === key)?.signals ?? []).map((s) => `${s.code}:${s.level}`);
+
+// { report, rlabel, key, has, hasNot }. Note the headline findings:
+//  - TEST-FRAUD-SELLER surfaces ONLY as a flag (servable-but-flagged).
+//  - TEST-IPV6-DC-SELLER blocks -> the IPv6 path is exercised, not skipped.
+//  - ROTATE-* is invisible in the publisher dimension but the shared bundle
+//    (com.example.rotatedapp) is caught in the bundle dimension.
 const expect = [
-  { seller: 'TEST-FRAUD-SELLER', has: ['schedule_seller:flag'], hasNot: ['datacenter_seller:block', 'mismatch_seller:block'] },
-  { seller: 'TEST-HONEST-SELLER', has: [], hasNot: ['datacenter_seller:block', 'mismatch_seller:block', 'schedule_seller:flag'] },
-  { seller: 'TEST-DC-SELLER', has: ['datacenter_seller:block'], hasNot: [] },
-  { seller: 'TEST-MISMATCH-SELLER', has: ['mismatch_seller:block'], hasNot: [] },
+  { report: byPublisher, rlabel: 'publisher', key: 'TEST-FRAUD-SELLER', has: ['schedule_seller:flag'], hasNot: ['datacenter_seller:block', 'mismatch_seller:block', 'invalid_ifa_seller:flag', 'ifa_reuse_seller:flag'] },
+  { report: byPublisher, rlabel: 'publisher', key: 'TEST-HONEST-SELLER', has: [], hasNot: ['datacenter_seller:block', 'mismatch_seller:block', 'schedule_seller:flag', 'invalid_ifa_seller:flag', 'ifa_reuse_seller:flag'] },
+  { report: byPublisher, rlabel: 'publisher', key: 'TEST-DC-SELLER', has: ['datacenter_seller:block'], hasNot: [] },
+  { report: byPublisher, rlabel: 'publisher', key: 'TEST-MISMATCH-SELLER', has: ['mismatch_seller:block'], hasNot: [] },
+  { report: byPublisher, rlabel: 'publisher', key: 'TEST-ZEROIFA-SELLER', has: ['invalid_ifa_seller:flag', 'ifa_lmt_mismatch:flag'], hasNot: ['ifa_reuse_seller:flag'] },
+  { report: byPublisher, rlabel: 'publisher', key: 'TEST-REUSE-SELLER', has: ['ifa_reuse_seller:flag'], hasNot: ['invalid_ifa_seller:flag'] },
+  { report: byPublisher, rlabel: 'publisher', key: 'TEST-SCHAIN-SELLER', has: ['schain_inconsistent:flag'], hasNot: ['bundle_incoherent:flag', 'unauthorized_seller:flag'] },
+  { report: byPublisher, rlabel: 'publisher', key: 'TEST-BUNDLE-SELLER', has: ['bundle_incoherent:flag'], hasNot: ['schain_inconsistent:flag'] },
+  { report: byPublisher, rlabel: 'publisher', key: 'TEST-IPV6-DC-SELLER', has: ['datacenter_seller:block'], hasNot: [] },
+  { report: byPublisher, rlabel: 'publisher', key: 'TEST-BOGON-SELLER', has: ['bogon_seller:block'], hasNot: ['datacenter_seller:block'] },
+  { report: byPublisher, rlabel: 'publisher', key: 'ROTATE-0', has: [], hasNot: ['schedule_seller:flag'] },
+  { report: byBundle, rlabel: 'bundle', key: 'com.example.rotatedapp', has: ['schedule_seller:flag'], hasNot: [] },
 ];
 
 let failures = 0;
-console.log('=== detector report ===');
-for (const s of report.bySeller) {
-  console.log(`\n${s.seller}  [${s.verdict}]  n=${s.volume}`);
-  console.log('  stats:', JSON.stringify(s.stats));
-  console.log('  signals:', s.signals.length ? s.signals.map((x) => `${x.code}(${x.level}) ${x.detail}`).join(' | ') : '(none)');
+console.log('=== detector report (publisher dimension) ===');
+for (const g of byPublisher.groups.filter((x) => !x.key.startsWith('ROTATE-'))) {
+  console.log(`\n${g.key}  [${g.verdict}]  n=${g.volume}`);
+  console.log('  signals:', g.signals.length ? g.signals.map((x) => `${x.code}(${x.level})`).join(' | ') : '(none)');
 }
+console.log(`\n(+ 60 ROTATE-* publisher groups, each n=2 -> all clean: rotation is invisible here)`);
 
 console.log('\n=== assertions ===');
 for (const e of expect) {
-  const got = codesFor(e.seller);
+  const got = codesIn(e.report, e.key);
   for (const code of e.has) {
     const ok = got.includes(code);
     if (!ok) failures += 1;
-    console.log(`  [${ok ? 'PASS' : 'FAIL'}] ${e.seller} should flag ${code}`);
+    console.log(`  [${ok ? 'PASS' : 'FAIL'}] (${e.rlabel}) ${e.key} should flag ${code}`);
   }
   for (const code of e.hasNot) {
     const ok = !got.includes(code);
     if (!ok) failures += 1;
-    console.log(`  [${ok ? 'PASS' : 'FAIL'}] ${e.seller} should NOT flag ${code}`);
+    console.log(`  [${ok ? 'PASS' : 'FAIL'}] (${e.rlabel}) ${e.key} should NOT flag ${code}`);
   }
 }
 
-console.log(`\nsummary: ${JSON.stringify(report.summary)}`);
+console.log(`\npublisher summary: ${JSON.stringify(byPublisher.summary)}`);
 console.log(failures ? `\n${failures} assertion(s) FAILED` : '\nall assertions passed');
 process.exit(failures ? 1 : 0);
