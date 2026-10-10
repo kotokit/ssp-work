@@ -34,7 +34,7 @@
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 
-import { analyze } from './detector.mjs';
+import { analyze, DEFAULT_THRESHOLDS } from './detector.mjs';
 import { buildImpressionHeaders } from './android-headers.mjs';
 import { initGeoIP, getGeoDetail } from './geo.mjs';
 import { loadUserAgents } from './uas.mjs';
@@ -293,16 +293,26 @@ export function buildCorpus({ size = 60 } = {}) {
  * A cohort is "caught" when the detector raises the signal its defect should
  * produce. For the clean cohort, any raised signal is a false positive.
  */
-export function score(report, labels) {
+export function score(report, labels, { minVolume = DEFAULT_THRESHOLDS.minVolume } = {}) {
   const rows = [];
 
   for (const group of report.groups) {
     const label = labels.get(group.key);
     const codes = group.signals.map((s) => s.code);
 
-    const caught = label.expectSignal
-        ? codes.includes(label.expectSignal)
-        : codes.length === 0;
+    /*
+     * Several signals are gated behind minVolume: the detector deliberately
+     * refuses to judge a group on aggregate statistics below that size. A
+     * small cohort is therefore NOT EVALUABLE, which is different from a
+     * miss — treating them the same would report a false recall failure.
+     */
+    const evaluable = group.volume >= minVolume;
+
+    const caught = !evaluable
+        ? null
+        : (label.expectSignal
+            ? codes.includes(label.expectSignal)
+            : codes.length === 0);
 
     rows.push({
       cohort: label.cohort,
@@ -312,13 +322,17 @@ export function score(report, labels) {
       raised: codes,
       verdict: group.verdict,
       caught,
+      evaluable,
       volume: group.volume,
       stats: group.stats,
     });
   }
 
-  const positives = rows.filter((r) => r.defect !== null);
-  const negatives = rows.filter((r) => r.defect === null);
+  const scored = rows.filter((r) => r.evaluable);
+  const notEvaluated = rows.filter((r) => !r.evaluable);
+
+  const positives = scored.filter((r) => r.defect !== null);
+  const negatives = scored.filter((r) => r.defect === null);
 
   const truePositives = positives.filter((r) => r.caught).length;
   const falseNegatives = positives.length - truePositives;
@@ -340,7 +354,10 @@ export function score(report, labels) {
       falseNegatives,
       falsePositives,
       trueNegatives,
+      notEvaluated: notEvaluated.length,
     },
+    notEvaluated: notEvaluated.map((r) => r.cohort),
+    minVolume,
     precision,
     recall,
   };
@@ -352,6 +369,7 @@ export function score(report, labels) {
 
 const green = (t) => `\u001b[32m${t}\u001b[0m`;
 const red = (t) => `\u001b[31m${t}\u001b[0m`;
+const yellow = (t) => `\u001b[33m${t}\u001b[0m`;
 const dim = (t) => `\u001b[2m${t}\u001b[0m`;
 
 async function main() {
@@ -398,7 +416,9 @@ async function main() {
   );
 
   for (const row of result.rows) {
-    const mark = row.caught ? green('caught') : red('MISSED');
+    const mark = row.caught === null
+        ? yellow('n/e ')
+        : (row.caught ? green('caught') : red('MISSED'));
 
     console.log(
         pad(row.cohort, 18) +
@@ -409,11 +429,25 @@ async function main() {
   }
 
   console.log('');
+
+  if (result.confusion.notEvaluated > 0) {
+    console.log(yellow(
+        `  note: ${result.confusion.notEvaluated} cohort(s) below minVolume=${result.minVolume} ` +
+        `were NOT evaluated (${result.notEvaluated.join(', ')}).`,
+    ));
+    console.log(yellow(
+        `  aggregate signals such as http_incoherent are gated at that size by design. ` +
+        `Use --size ${result.minVolume} or more for a meaningful recall number.`,
+    ));
+    console.log('');
+  }
+
   console.log('confusion matrix');
   console.log(`  true positives  : ${result.confusion.truePositives}`);
   console.log(`  false negatives : ${result.confusion.falseNegatives}`);
   console.log(`  false positives : ${result.confusion.falsePositives}   <- clean traffic wrongly accused`);
   console.log(`  true negatives  : ${result.confusion.trueNegatives}`);
+  console.log(`  not evaluated   : ${result.confusion.notEvaluated}   <- cohort below minVolume`);
   console.log('');
   console.log(
       `  precision : ${result.precision === null ? '-' : result.precision.toFixed(3)}` +

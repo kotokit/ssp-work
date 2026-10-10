@@ -35,6 +35,9 @@ import {
 } from './req.mjs';
 
 import { openPooledSession } from './us-session.mjs';
+import { PixelShooter, findBrowserBinary } from './browser.mjs';
+import { startProxyBridge } from './proxy-bridge.mjs';
+import { getProxyString } from './pr.mjs';
 import { initGeoIP, getGeoDetail } from './geo.mjs';
 import { loadUserAgents } from './uas.mjs';
 import { APP_FIXTURES } from './traffic.mjs';
@@ -54,8 +57,20 @@ Options:
   --url URL        Auction endpoint. Default: config/config.json
   --local          Send directly, not through the proxy. Use with the local
                    mock exchange (a proxy cannot reach 127.0.0.1).
+  --browser        Fire the pixel from a real headless Chromium instead of
+                   undici. Gives a genuine browser TLS + HTTP/2 fingerprint
+                   and real sec-fetch-* headers, which no HTTP client can
+                   imitate. Requires Chrome/Chromium (set CHROME_PATH if it
+                   is not auto-detected).
   --verbose        Print each request body.
   --help
+
+WHY --browser EXISTS
+
+  A Node HTTP client's TLS ClientHello is Node's, whatever headers are set.
+  A real device's pixel comes from the browser engine. --browser replaces the
+  pixel request only; the auction stays on undici because it is a
+  server-to-server POST where a browser adds nothing.
 `;
 
 function parseArgs(argv) {
@@ -66,7 +81,7 @@ function parseArgs(argv) {
   for (let i = 0; i < argv.length; i += 1) {
     const token = argv[i];
 
-    if (token === '--local' || token === '--verbose' || token === '--help') {
+    if (token === '--local' || token === '--browser' || token === '--verbose' || token === '--help') {
       flags.add(token);
       continue;
     }
@@ -124,6 +139,7 @@ async function main() {
   const parallel = Math.min(num(args.values.get('--parallel'), 6), MAX_CONCURRENCY);
   const floor = num(args.values.get('--floor'), 0.5);
   const local = args.flags.has('--local');
+  const useBrowser = args.flags.has('--browser');
   const verbose = args.flags.has('--verbose');
 
   await initGeoIP();
@@ -134,6 +150,40 @@ async function main() {
   console.log(`pool        : ${entries.length} US IPs  ${dim(`(ttl ${pool.ttlMinutes ?? '?'}m, verified ${pool.verifiedAt ?? pool.updatedAt ?? 'unknown'})`)}`);
   console.log(`auctions    : ${count} across ${Math.min(parallel, count)} concurrent IPs`);
   console.log(`mode        : ${local ? 'LOCAL (auction sent direct)' : 'PROXIED'}`);
+
+  /* ---------------------------------------------------------------------- */
+  /* Optional: real-browser pixel firing                                    */
+  /* ---------------------------------------------------------------------- */
+
+  let shooter = null;
+  let bridge = null;
+
+  if (useBrowser) {
+    const binary = findBrowserBinary();
+
+    if (!binary) {
+      console.error(red('No Chrome/Chromium found. Set CHROME_PATH, or install one.'));
+      return 1;
+    }
+
+    /*
+     * Chromium is pointed at a LOCAL bridge rather than at the residential
+     * proxy directly: Chrome's own proxy auth can hang instead of failing,
+     * and the bridge also keeps credentials out of the browser.
+     */
+    bridge = await startProxyBridge({
+      upstream: getProxyString(),
+      onLog: (m) => { if (verbose) console.error(dim(`  [bridge] ${m}`)); },
+    });
+
+    shooter = new PixelShooter({ executablePath: binary, verbose });
+    await shooter.start();
+
+    console.log(`pixel       : headless Chromium  ${dim(binary)}`);
+    console.log(`              via bridge ${bridge.url} -> residential proxy`);
+    console.log(dim('              TLS + HTTP/2 are genuinely the browser\'s'));
+  }
+
   console.log('');
 
   /* ---------------------------------------------------------------------- */
@@ -252,21 +302,53 @@ async function main() {
         }
 
         try {
-          const status = await fireImpression(pixel, {
-            dispatcher: local ? undefined : session.dispatcher,
-            headers: {
-              'user-agent': ua,
-              'x-forwarded-for': session.ip,
-            },
-          });
+          let ok = false;
 
-          if (status >= 200 && status < 400) {
+          if (shooter) {
+            /*
+             * Real browser: render the creative and let Chromium fetch the
+             * pixel as an image subresource. Real TLS, real HTTP/2, real
+             * sec-fetch-* headers.
+             */
+            const adm = result.json?.seatbid?.[0]?.bid?.[0]?.adm;
+
+            const shot = await shooter.firePixel({
+              adm,
+              pixelUrl: pixel,
+              ua,
+              proxy: { server: bridge.url },
+              device: {
+                width: body.device.w ?? 360,
+                height: body.device.h ?? 640,
+                pixelRatio: body.device.pxratio ?? 3,
+              },
+            });
+
+            ok = shot.ok;
+
+            if (!shot.ok && verbose) {
+              console.error(dim(`  w${workerId} browser pixel: ${shot.error ?? 'no hit'}`));
+            }
+          } else {
+            const status = await fireImpression(pixel, {
+              dispatcher: local ? undefined : session.dispatcher,
+              headers: {
+                'user-agent': ua,
+                'x-forwarded-for': session.ip,
+              },
+            });
+
+            ok = status >= 200 && status < 400;
+          }
+
+          if (ok) {
             stats.impFired += 1;
 
             console.log(
                 green(`  w${workerId} ${session.ip.padEnd(16)}`) +
                 ` bid + imp ` +
-                dim(`${session.city ?? geo?.city ?? '-'}  ${app.bundle}  ${body.device.model}`),
+                dim(`${session.city ?? geo?.city ?? '-'}  ${app.bundle}  ${body.device.model}`) +
+                (shooter ? dim('  [browser]') : ''),
             );
           } else {
             stats.impFailed += 1;
@@ -293,6 +375,9 @@ async function main() {
   );
 
   const elapsed = ((Date.now() - started) / 1000).toFixed(1);
+
+  if (shooter) await shooter.close();
+  if (bridge) await bridge.close();
 
   console.log('');
   console.log('=== summary ===');

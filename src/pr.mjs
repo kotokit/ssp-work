@@ -296,3 +296,52 @@ if (process.argv[1] && process.argv[1].endsWith('pr.mjs') && process.argv.includ
     process.stdout.write(`export ${key}='${value}'\n`);
   }
 }
+
+/* -------------------------------------------------------------------------- */
+/* Proxy agent with browser-like ALPN                                         */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * TLS options that make the ALPN offer match Chrome's.
+ *
+ * undici's connector defaults to `ALPNProtocols: ['http/1.1', 'h2']` — it
+ * offers HTTP/1.1 FIRST, so a server that supports both picks HTTP/1.1. A
+ * real Android WebView offers `h2` first and negotiates HTTP/2.
+ *
+ * Setting `preferH2` flips that to `['h2', 'http/1.1']`. `allowH2` is
+ * already true by default and is stated explicitly so a future default
+ * change cannot silently downgrade this to HTTP/1.1.
+ */
+export const BROWSER_TLS = Object.freeze({
+  allowH2: true,
+  preferH2: true,
+});
+
+/**
+ * Build a ProxyAgent whose tunnelled connections negotiate HTTP/2 the way a
+ * browser does.
+ *
+ * Note: this affects the protocol of the tunnelled request. The TLS
+ * ClientHello is still Node's, not Chrome's, so JA3/JA4 do not match a real
+ * device — only a real browser can fix that.
+ *
+ * @param {object} [options]
+ * @param {number} [options.connections] pinned connections; 1 keeps one exit IP
+ * @param {string} [options.uri] proxy URL; defaults to the .env credentials
+ */
+export async function createProxyAgent({ connections = 1, uri } = {}) {
+  const { ProxyAgent } = await import('undici');
+
+  const proxyUri = uri ?? getProxyString();
+
+  if (!proxyUri) {
+    throw new Error('No proxy configured (PROXY_HOST/PORT/USER/PASS missing in .env).');
+  }
+
+  return new ProxyAgent({
+    uri: proxyUri,
+    connections,
+    pipelining: 1,
+    requestTls: { ...BROWSER_TLS },
+  });
+}

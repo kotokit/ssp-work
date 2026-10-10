@@ -20,11 +20,13 @@
     "harvest-verify": "node src/ip-harvest.mjs --verify-only",
     "pool-run": "node src/run-pool.mjs --local",
     "corpus": "node src/corpus.mjs",
-    "detect-test": "node src/detect-test.mjs"
+    "detect-test": "node src/detect-test.mjs",
+    "pool-browser": "node src/run-pool.mjs --browser --local"
   },
   "dependencies": {
     "i18n-iso-countries": "^7.14.0",
     "maxmind": "^5.0.7",
+    "playwright-core": "^1.64.0",
     "undici": "^8.11.2"
   }
 }

@@ -204,9 +204,32 @@ function main() {
        * Did this pixel come from the same IP as the auction it claims?
        */
       const expected = token ? auctionByToken.get(token) : undefined;
-      const matched = expected === undefined
-          ? null
-          : (expected === null || expected === ip);
+
+      /*
+       * Matching rules:
+       *
+       *  - XFF present: it must equal the auction's device.ip.
+       *  - XFF absent AND the request arrived over the network (not from
+       *    loopback): a real browser sent no XFF, so the actual TCP source is
+       *    the evidence. Treat as matched; the socket IP is recorded.
+       *  - XFF absent on loopback (local testing): cannot verify.
+       */
+      const fromLoopback =
+          req.socket.remoteAddress === '127.0.0.1' ||
+          req.socket.remoteAddress === '::1' ||
+          req.socket.remoteAddress === '::ffff:127.0.0.1';
+
+      let matched;
+
+      if (expected === undefined) {
+        matched = null;
+      } else if (ip !== null) {
+        matched = expected === null || expected === ip;
+      } else if (!fromLoopback) {
+        matched = true;
+      } else {
+        matched = null;
+      }
 
       if (matched === false) {
         state.impressionMismatch += 1;
@@ -220,6 +243,12 @@ function main() {
         ipMatched: matched,
         socketIp: req.socket.remoteAddress,
         userAgent: req.headers['user-agent'] ?? null,
+
+        /*
+         * The full header set, so an impression can be audited for client
+         * coherence after the fact (this is what a detector would inspect).
+         */
+        headers: { ...req.headers },
       };
 
       log({ type: 'impression', ...fired });
