@@ -555,11 +555,11 @@ export function buildAuctionRequest({
 
     displaymanager:
         traffic.displayManager ??
-        'BidMachine',
+        'third_party_sdk',
 
     displaymanagerver:
         traffic.displayManagerVer ??
-        '3.3.0',
+        '0',
 
     // IMPORTANT:
     // This is the value supplied by ssp-server.mjs.
@@ -689,16 +689,10 @@ export function buildAuctionRequest({
 
 
 
-    hwv,
-
-
-
-    ppi: profile.ppi,
-
-    pxratio: profile.pxratio,
-
-
-    mccmnc,
+    //hwv,
+    //ppi: profile.ppi,
+    //pxratio: profile.pxratio,
+    //mccmnc,
 
 
     // These are now ACTUAL hashes of the device ID
@@ -721,19 +715,13 @@ export function buildAuctionRequest({
       `${safeBundle.split('.')[1] ?? 'example'}.com`;
 
   const app = clean({
-    id:
-        traffic.appId ??
-        `app-${safeBundle}`,
+    id: crypto.randomBytes(6).toString('hex'),
 
     bundle: safeBundle,
 
-    name:
-        appName ??
-        'App',
+    name: appName,
 
-    domain:
-        traffic.appDomain ??
-        defaultDomain,
+    domain: defaultDomain,
 
     storeurl:
         traffic.storeurl ??
@@ -747,13 +735,13 @@ export function buildAuctionRequest({
 
     ver:
         traffic.appVer ??
-        '1.0.0',
+        '2.2.82',
 
-    content: {
+    /*content: {
       keywords:
           traffic.appKeywords ??
           `${appName ?? 'App'},Gaming`,
-    },
+    },*/
 
     publisher: {
       id: String(publisherId),
@@ -806,10 +794,9 @@ export function buildAuctionRequest({
         gdpr: 0,
       },
 
-      gpp: gpp.gpp,
+      //gpp: gpp.gpp,
 
-      gpp_sid:
-      gpp.gpp_sid,
+      //gpp_sid: gpp.gpp_sid,
     },
 
     source: {
@@ -819,12 +806,12 @@ export function buildAuctionRequest({
       tid: requestId,
 
       ext: {
-        schain:
+        /*schain:
             buildSchain(
                 requestId,
                 publisherId,
                 traffic,
-            ),
+            ),*/
       },
     },
   });
