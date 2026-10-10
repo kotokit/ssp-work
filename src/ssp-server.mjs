@@ -4,7 +4,7 @@
  *
  * Preserves:
  *   - config/config.json
- *   - ./uas.mjs and ./request.mjs interfaces
+ *   - ./uas.mjs and ./req.mjs interfaces
  *   - SSP_SUPPLY_KEY authentication
  *   - Existing CLI options
  *   - GET /status and POST /stop on localhost
@@ -34,19 +34,31 @@
  */
 
 import { createServer } from 'node:http';
-import { readFileSync } from 'node:fs';
+import { readFileSync, createWriteStream, mkdirSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 import { performance } from 'node:perf_hooks';
 
 import { loadUserAgents } from './uas.mjs';
+import { APP_FIXTURES } from './traffic.mjs';
 import {
   buildAuctionRequest,
   sendAuction,
   extractImpPixel,
   fireImpression,
-} from './request.mjs';
-import { getProxyString } from './pr';
+  validateDevice,
+  parseDevice,
+} from './req.mjs';
+import {
+  verifyProxy,
+  proxyProblem as proxyProblemForStartup,
+  getProxyCredentials,
+} from './pr.mjs';
+import {
+  initGeoIP,
+  geoAvailable,
+  geoPath,
+} from './geo.mjs';
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
 
@@ -71,6 +83,9 @@ Options:
   --no-imp                Disable impression tracking
   --seller ID             Use a single publisher ID
   --max-in-flight N       Maximum concurrent attempts
+  --log-body [FILE]       Write each request body as JSONL. Use '-' for stdout.
+                          Default FILE when omitted: logs/bodies.jsonl
+  --log-body-limit N      Maximum bodies to write. Default: 100
   --verbose               Log individual bid responses
   --quiet                 Disable periodic and startup logs
   --port N                Local control API port
@@ -93,6 +108,14 @@ function parseArgs(argv) {
     '--help',
   ]);
 
+  /*
+   * Flags whose value is optional: `--log-body` on its own uses the default
+   * path, `--log-body -` or `--log-body out.jsonl` uses the given one.
+   */
+  const optionalValueFlags = new Set([
+    '--log-body',
+  ]);
+
   for (let i = 0; i < argv.length; i += 1) {
     const token = argv[i];
 
@@ -102,6 +125,23 @@ function parseArgs(argv) {
 
     if (booleanFlags.has(token)) {
       flags.add(token);
+      continue;
+    }
+
+    if (optionalValueFlags.has(token)) {
+      const next = argv[i + 1];
+
+      if (next !== undefined && !next.startsWith('--')) {
+        if (values.has(token)) {
+          throw new Error(`Duplicate argument: ${token}`);
+        }
+
+        values.set(token, next);
+        i += 1;
+      } else {
+        flags.add(token);
+      }
+
       continue;
     }
 
@@ -131,6 +171,8 @@ function parseArgs(argv) {
     '--seller',
     '--max-in-flight',
     '--port',
+    '--log-body',
+    '--log-body-limit',
   ]);
 
   for (const key of values.keys()) {
@@ -352,6 +394,31 @@ function main() {
   const verbose = args.flags.has('--verbose');
   const quiet = args.flags.has('--quiet');
 
+  /* ------------------------------------------------------------------------ */
+  /* Request body logging                                                     */
+  /* ------------------------------------------------------------------------ */
+
+  const logBodyTo = args.values.get('--log-body') ??
+      (args.flags.has('--log-body') ? 'logs/bodies.jsonl' : null);
+
+  const logBodyLimit = Math.max(
+      0,
+      Math.floor(
+          numberOption(args, '--log-body-limit', 100),
+      ),
+  );
+
+  let bodiesLogged = 0;
+  let bodyLogStream = null;
+
+  if (logBodyTo && logBodyTo !== '-' && logBodyLimit > 0) {
+    const logPath = join(ROOT, logBodyTo);
+
+    mkdirSync(dirname(logPath), { recursive: true });
+
+    bodyLogStream = createWriteStream(logPath, { flags: 'a' });
+  }
+
   const controlPort = positiveNumber(
       numberOption(args, '--port', cfg.control?.port ?? 8200),
       '--port',
@@ -362,8 +429,18 @@ function main() {
     throw new Error('--port must be between 1 and 65535');
   }
 
-  const bundle = cfg.traffic.bundle;
-  const appName = cfg.traffic.appName ?? 'App';
+  /*
+   * Real app portfolio. Each fixture carries its own bundle, app.id,
+   * publisher, categories and supply chain, so requests look like the
+   * publisher's genuine traffic spread instead of one fixed app repeated.
+   */
+  const traffic = {
+    ...cfg.traffic,
+    apps: APP_FIXTURES,
+  };
+
+  const bundle = cfg.traffic.bundle ?? APP_FIXTURES[0].bundle;
+  const appName = cfg.traffic.appName ?? APP_FIXTURES[0].name;
 
   const sellers = args.values.has('--seller')
       ? [{ publisherId: args.values.get('--seller'), weight: 1 }]
@@ -567,6 +644,10 @@ function main() {
     if (schedulerTimer) clearTimeout(schedulerTimer);
     if (logTimer) clearInterval(logTimer);
 
+    if (bodyLogStream) {
+      bodyLogStream.end();
+    }
+
     const elapsedSec = Math.max(
         (performance.now() - startMono) / 1000,
         0.001,
@@ -589,6 +670,7 @@ function main() {
         bundle,
         pool: `${pool.ips.length}ips/${pool.subnets ?? 'unknown'}subnets`,
         userAgents: uas.length,
+        geoip: geoAvailable() ? geoPath() : 'disabled',
       },
     };
 
@@ -684,38 +766,25 @@ function main() {
     try {
       ua = randUa();
 
+      const deviceCheck = validateDevice(ua, parseDevice(ua));
+
+      if (!deviceCheck.valid) {
+        throw new Error(
+            `UA is not a supported device fixture: ${deviceCheck.errors.join('; ')}`,
+        );
+      }
+
+      /*
+       * One pool entry supplies the IP, the ISP and the metro.
+       *
+       * They must come from the SAME entry: the exchange derives geo from
+       * the IP it sees, so an IP from Dallas paired with a Boston metro is
+       * a mismatch. No network call is needed here, which keeps the launch
+       * path free of subprocesses and per-request lookups.
+       */
       const endpoint = randEndpoint();
 
-      const proxy = getProxyString();
-
-      const code = `
-fetch('https://ipinfo.io/json')
-  .then(r => r.json())
-  .then(j => console.log(JSON.stringify({
-    ip: j.ip,
-    isp: j.org,
-    metro: j.dma || undefined,
-    city: j.city,
-    region: j.region,
-    country: j.country,
-    loc: j.loc,
-    postal: j.postal
-  })))
-`;
-
-      const r = spawnSync(process.execPath, ['-e', code], {
-        encoding: 'utf8',
-        env: {
-          ...process.env,
-          NODE_USE_ENV_PROXY: '1',
-          HTTPS_PROXY: proxy,
-          HTTP_PROXY: proxy,
-        },
-      });
-
-      const data = JSON.parse(r.stdout.trim());
-
-      const ip = data.ip;
+      const ip = endpoint.ip;
 
       const seller = pickSeller();
       sellerId = seller.publisherId;
@@ -736,14 +805,43 @@ fetch('https://ipinfo.io/json')
         format,
         bidfloor: winnable ? WIN_FLOOR : LOSE_FLOOR,
         geoMeta: {
-          isp: data.isp,
-          metro: data.metro,
+          isp: endpoint.isp,
+          metro: endpoint.metro,
         },
-        traffic: cfg.traffic,
+        traffic,
       });
 
       if (verbose) {
         console.log('Auction request body:', JSON.stringify(body, null, 2));
+      }
+
+      /*
+       * JSONL capture of the exact request body.
+       *
+       * One compact JSON object per line, so the stream stays greppable and
+       * pipeable (`... --log-body | jq -c .`) and survives high qps without
+       * flooding the periodic status log. `--log-body N` caps how many
+       * bodies are written.
+       */
+      if (logBodyTo && bodiesLogged < logBodyLimit) {
+        bodiesLogged += 1;
+
+        const line = JSON.stringify({
+          t: new Date().toISOString(),
+          seq: bodiesLogged,
+          seller: sellerId,
+          winnable,
+          ip: endpoint.ip,
+          isp: endpoint.isp,
+          metro: endpoint.metro,
+          body,
+        });
+
+        if (logBodyTo === '-') {
+          process.stdout.write(`${line}\n`);
+        } else {
+          bodyLogStream.write(`${line}\n`);
+        }
       }
 
       const auctionStarted = performance.now();
@@ -797,9 +895,17 @@ fetch('https://ipinfo.io/json')
           const impressionStarted = performance.now();
 
           try {
+            /*
+             * Fire from the same simulated device: same IP and same UA as
+             * the auction request, so the exchange can match the impression
+             * back to the bid it served.
+             */
             const impressionStatus = await fireImpression(pixel, {
-              ip,
-              ua,
+              headers: {
+                'x-forwarded-for': ip,
+                'x-real-ip': ip,
+                'user-agent': ua,
+              },
             });
 
             if (
@@ -959,7 +1065,45 @@ fetch('https://ipinfo.io/json')
     }, LOG_INTERVAL_MS);
   }
 
-  control.listen(controlPort, '127.0.0.1', () => {
+  control.listen(controlPort, '127.0.0.1', async () => {
+    /*
+     * GeoIP database: device.geo is derived from the IP via MaxMind, so a
+     * missing database silently downgrades every request to the pool's
+     * coarse CIDR guess. Load it before any request is built.
+     */
+    const geo = await initGeoIP();
+
+    if (!quiet) {
+      console.log(
+          geo.ok
+              ? `geoip OK: ${geo.path}`
+              : `!! GEOIP DISABLED: ${geo.error}`,
+      );
+    }
+
+    /*
+     * Proxy preflight.
+     *
+     * A proxy that is configured but bypassed is worse than none: traffic
+     * leaves from this machine's own IP while appearing proxied. Check it
+     * once up front and refuse to start quietly in that state.
+     */
+    const proxyProblem = proxyProblemForStartup();
+
+    if (proxyProblem && !quiet) {
+      console.error(`\n!! PROXY PROBLEM\n${proxyProblem}\n`);
+    } else if (!quiet && getProxyCredentials()) {
+      const preflight = await verifyProxy({ timeoutMs: 15_000 });
+
+      if (preflight.ok) {
+        console.log(
+            `proxy OK: exit ${preflight.ip} (${preflight.country} ${preflight.city ?? '-'})`,
+        );
+      } else {
+        console.error(`\n!! PROXY PREFLIGHT FAILED\n${preflight.error}\n`);
+      }
+    }
+
     if (!quiet) {
       const eta =
           impTarget !== null && qps > 0
@@ -977,6 +1121,9 @@ fetch('https://ipinfo.io/json')
           `sellers=[${sellers.map((seller) => seller.publisherId).join(',')}] ` +
           `pool=${pool.ips.length}ips uas=${uas.length} ` +
           `control=127.0.0.1:${controlPort}` +
+          (logBodyTo
+            ? ` logBody=${logBodyTo === '-' ? 'stdout' : logBodyTo}(max ${logBodyLimit})`
+            : '') +
           (eta ? ` estimatedETA=${eta}s` : ''),
       );
     }

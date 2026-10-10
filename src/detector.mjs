@@ -21,6 +21,7 @@
 // `ctx` so this file stays pure and testable.
 
 import { inCidrList, networkKey, isBogon } from './ip.mjs';
+import { auditHeaders } from './android-headers.mjs';
 
 // ---- thresholds (override via ctx.thresholds) -----------------------------
 export const DEFAULT_THRESHOLDS = {
@@ -38,6 +39,7 @@ export const DEFAULT_THRESHOLDS = {
   schainShare: 0.3, // >= this share with schain terminal sid != publisher.id / incomplete -> schain_inconsistent (flag)
   bundleShare: 0.3, // >= this share where storeurl doesn't match app.bundle -> bundle_incoherent (flag)
   deviceShare: 0.3, // >= this share with internally contradictory device values -> device_inconsistent (flag)
+  httpShare: 0.3, // >= this share of impressions whose HTTP client fingerprint contradicts itself -> http_incoherent (flag)
 };
 
 // ---- IP classification ----------------------------------------------------
@@ -217,6 +219,8 @@ function scoreGroup(key, events, ctx) {
   let ifaMalformed = 0;
   let ifaMissing = 0;
   let ifaLmtBad = 0;
+  let httpBad = 0;
+  let httpEval = 0;
   const bundles = new Map();
   const ifas = new Set(); // distinct *valid* device IDs
   const ifaNets = new Map(); // valid ifa -> Set of request networks (reuse detection)
@@ -274,6 +278,22 @@ function scoreGroup(key, events, ctx) {
       const net = networkKey(ev.impressionIp);
       if (net) nets.set(net, (nets.get(net) ?? 0) + 1);
     }
+
+    /*
+     * HTTP client coherence.
+     *
+     * Only evaluable when the impression carried its request headers. A
+     * real in-app pixel comes from a WebView, so its headers must agree
+     * with each other and with the user-agent. A script that sets
+     * --user-agent and nothing else fails here while looking perfect in
+     * the bid request.
+     */
+    if (ev.impressionHeaders) {
+      httpEval += 1;
+      if (auditHeaders(ev.impressionHeaders, { ua: ev.request?.device?.ua }).ok === false) {
+        httpBad += 1;
+      }
+    }
   }
 
   const topBundle = [...bundles.entries()].sort((a, b) => b[1] - a[1])[0] ?? ['?', 0];
@@ -324,6 +344,9 @@ function scoreGroup(key, events, ctx) {
     if (reusedIfaCount > 0) {
       add('ifa_reuse_seller', 'flag', `${reusedIfaCount} valid device IDs each seen on >= ${t.ifaMaxNets} distinct networks`);
     }
+    if (httpEval > 0 && share(httpBad, httpEval) >= t.httpShare) {
+      add('http_incoherent', 'flag', `${httpBad}/${httpEval} impressions with self-contradicting HTTP fingerprints (client hints vs user-agent vs accept)`);
+    }
   }
 
   return {
@@ -336,6 +359,7 @@ function scoreGroup(key, events, ctx) {
       mismatchShare: Number(share(mismatch, mismatchEval).toFixed(3)),
       nightShare: Number(share(night, n).toFixed(3)),
       invalidIfaShare: Number(share(invalidIfa, n).toFixed(3)),
+      httpIncoherentShare: httpEval > 0 ? Number(share(httpBad, httpEval).toFixed(3)) : null,
       topBundle: { bundle: topBundle[0], share: Number(share(topBundle[1], n).toFixed(3)) },
       distinctIfa: ifas.size,
       reusedIfas: reusedIfaCount,

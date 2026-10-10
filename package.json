@@ -6,7 +6,25 @@
   "description": "Local SSP integration simulator for the ADX exchange: onboarded supply partner that relays OpenRTB auction requests (varied UA + US residential IPs) and fires the sealed impression pixel, so the full supply funnel (request -> auction -> win -> impression) is exercised end to end.",
   "scripts": {
     "pool": "node src/ippool.mjs",
-    "server": "node src/ssp-server.mjs",
-    "once": "node src/ssp-server.mjs --count 1 --verbose"
+    "server": "bash run.sh",
+    "once": "bash run.sh --requests 1 --verbose",
+    "generate": "node src/generate.mjs",
+    "mock": "node src/mock-exchange.mjs",
+    "check": "node src/generate.mjs --count 25 --quiet --strict",
+    "proxy": "bash -c 'eval \"$(node src/pr.mjs --export)\" && node --use-env-proxy src/proxy-check.mjs'",
+    "geo": "node src/geo-check.mjs",
+    "geo-all": "node src/geo-check.mjs --all",
+    "us": "node src/run-us.mjs",
+    "us-local": "node src/run-us.mjs --local",
+    "harvest": "node src/ip-harvest.mjs --target 1000",
+    "harvest-verify": "node src/ip-harvest.mjs --verify-only",
+    "pool-run": "node src/run-pool.mjs --local",
+    "corpus": "node src/corpus.mjs",
+    "detect-test": "node src/detect-test.mjs"
+  },
+  "dependencies": {
+    "i18n-iso-countries": "^7.14.0",
+    "maxmind": "^5.0.7",
+    "undici": "^8.11.2"
   }
 }

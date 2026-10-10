@@ -26,6 +26,22 @@
 
 import crypto from 'node:crypto';
 
+import {
+    request as undiciRequest,
+} from 'undici';
+
+import {
+    buildImpressionHeaders,
+} from './android-headers.mjs';
+
+import {
+    resolveMetro,
+} from './metros.mjs';
+
+import {
+    getGeo,
+} from './geo.mjs';
+
 /* -------------------------------------------------------------------------- */
 /* Constants                                                                  */
 /* -------------------------------------------------------------------------- */
@@ -422,14 +438,81 @@ function pick(items) {
     if (!Array.isArray(items) || items.length === 0) {
         return undefined;
     }
-
     return items[
         Math.floor(Math.random() * items.length)
         ];
 }
 
+/**
+ * Weighted pick, used to spread traffic across a publisher's app portfolio
+ * in proportion to how much inventory each app really serves.
+ */
+function pickWeightedApp(apps) {
+    const total =
+        apps.reduce(
+            (sum, app) => sum + (Number(app.weight) || 1),
+            0,
+        );
+
+    let remaining = Math.random() * total;
+
+    for (const app of apps) {
+        remaining -= Number(app.weight) || 1;
+
+        if (remaining < 0) {
+            return app;
+        }
+    }
+
+    return apps[apps.length - 1];
+}
+
 function randomUUID() {
     return crypto.randomUUID();
+}
+
+/**
+ * Request ID in the shape real supply uses.
+ *
+ * Observed in production traffic from this exchange: a 21-22 character
+ * lowercase hex token, ObjectId shaped (4-byte time prefix, then random).
+ * Lengths vary because the leading zero of the timestamp is dropped.
+ */
+function buildRequestId() {
+    const seconds =
+        Math.floor(Date.now() / 1000)
+            .toString(16)
+            .padStart(8, '0');
+
+    const random =
+        crypto.randomBytes(7).toString('hex');
+
+    const id = `${seconds}${random}`;
+
+    /*
+     * 22 characters normally, 21 when the timestamp has a leading zero —
+     * which is what the reference traffic shows.
+     */
+    return id.length === 22 && id.startsWith('0')
+        ? id.slice(1)
+        : id;
+}
+
+/**
+ * Stable identifier in the same 21-22 char hex shape as real traffic.
+ *
+ * Derived from a seed rather than random, so the same logical entity
+ * (a device, a user) keeps one value across every request. Per-request
+ * identifiers are a primary IVT signal.
+ */
+function buildStableId(...seedParts) {
+    const digest =
+        crypto
+            .createHash('sha256')
+            .update(seedParts.join('|'))
+            .digest('hex');
+
+    return digest.slice(0, 22);
 }
 
 function clean(value) {
@@ -672,7 +755,7 @@ function parseDevice(ua) {
         parseBuild(ua);
 
     return {
-        os: 'Android',
+        os: 'android',
 
         osv,
 
@@ -826,107 +909,101 @@ function validateDevice(ua, device) {
 /* Geo                                                                        */
 /* -------------------------------------------------------------------------- */
 
-const US_METROS = {
-    Boston: {
-        city: 'Boston',
-        state: 'MA',
-        country: 'USA',
-        lat: 42.3601,
-        lon: -71.0589,
-    },
-
-    NewYork: {
-        city: 'New York',
-        state: 'NY',
-        country: 'USA',
-        lat: 40.7128,
-        lon: -74.0060,
-    },
-
-    NewJersey: {
-        city: 'Newark',
-        state: 'NJ',
-        country: 'USA',
-        lat: 40.7357,
-        lon: -74.1724,
-    },
-
-    Dallas: {
-        city: 'Dallas',
-        state: 'TX',
-        country: 'USA',
-        lat: 32.7767,
-        lon: -96.7970,
-    },
-
-    Phoenix: {
-        city: 'Phoenix',
-        state: 'AZ',
-        country: 'USA',
-        lat: 33.4484,
-        lon: -112.0740,
-    },
-
-    WestLafayette: {
-        city: 'West Lafayette',
-        state: 'IN',
-        country: 'USA',
-        lat: 40.4259,
-        lon: -86.9081,
-    },
-};
-
-function normalizeMetro(metro) {
-    if (!metro) {
-        return null;
-    }
-
-    return String(metro)
-        .trim()
-        .toLowerCase()
-        .replace(/\s+/g, '');
-}
-
 function geoForMetro(
     metro,
     {
         includeCoordinates = true,
     } = {},
 ) {
-    const normalized =
-        normalizeMetro(metro);
+    const resolved =
+        resolveMetro(metro);
 
-    const entry =
-        Object.entries(US_METROS).find(
-            ([name]) =>
-                normalizeMetro(name) === normalized,
-        );
-
-    const source =
-        entry?.[1] ||
-        US_METROS.NewYork;
+    /*
+     * Unknown token: emit country + geo type only.
+     *
+     * Substituting an unrelated city here would put a city in the request
+     * that contradicts the IP the exchange actually sees. Country-level
+     * geo is truthful; a wrong city is not.
+     */
+    if (!resolved) {
+        return {
+            type: 2,
+            country: 'USA',
+        };
+    }
 
     const geo = {
         type: 2,
-
-        country: source.country,
-
-        region: source.state,
-
-        city: source.city,
+        country: 'USA',
+        region: resolved.region,
     };
 
-    /*
-     * Coordinates are only included when the QA configuration explicitly
-     * allows them. Metro/city information can still be provided without
-     * pretending that the exact device coordinate is known.
-     */
-    if (includeCoordinates) {
-        geo.lat = source.lat;
-        geo.lon = source.lon;
+    if (resolved.dma) {
+        geo.metro = resolved.dma;
+    }
+
+    if (resolved.kind === 'city') {
+        geo.city = resolved.city;
+        geo.zip = resolved.zip;
+
+        /*
+         * Coordinates are only meaningful together with a city, and only
+         * when the QA configuration explicitly allows them.
+         */
+        if (includeCoordinates) {
+            geo.lat = resolved.lat;
+            geo.lon = resolved.lon;
+        }
     }
 
     return geo;
+}
+
+/**
+ * Geo for the IP actually being sent.
+ *
+ * Priority:
+ *   1. MaxMind GeoLite2 lookup of `ip` — authoritative, because it is what
+ *      the exchange will use to geolocate the same address.
+ *   2. The IP pool's metro token, as a coarse fallback when the database has
+ *      no record. Coordinates are omitted in this case: a CIDR-block guess
+ *      does not justify a precise lat/lon, and a wrong coordinate is worse
+ *      than none.
+ */
+function geoForDevice(
+    ip,
+    metro,
+    {
+        includeCoordinates = true,
+    } = {},
+) {
+    const fromDb =
+        getGeo(ip);
+
+    if (fromDb) {
+        /*
+         * Respect an explicit opt-out of coordinates, but keep the city,
+         * region and DMA, which remain true without them.
+         */
+        if (!includeCoordinates) {
+            const {
+                lat,
+                lon,
+                ...rest
+            } = fromDb;
+
+            return rest;
+        }
+
+        return fromDb;
+    }
+
+    return geoForMetro(
+        metro,
+        {
+            includeCoordinates: false,
+        },
+    );
 }
 
 
@@ -984,13 +1061,6 @@ function buildBanner(
 
         h,
 
-        format: [
-            {
-                w,
-                h,
-            },
-        ],
-
         mimes: Array.isArray(
             traffic?.bannerMimes,
         )
@@ -1009,6 +1079,26 @@ function buildBanner(
             ? [...traffic.bannerBattr]
             : [...BANNER_BATTR],
     };
+
+    /*
+     * format[] is only meaningful when offering several sizes, or when the
+     * caller explicitly provides alternatives. A single entry that just
+     * repeats w/h is redundant.
+     */
+    const formats =
+        Array.isArray(traffic?.bannerFormats) &&
+        traffic.bannerFormats.length > 0
+            ? traffic.bannerFormats
+            : null;
+
+    if (formats) {
+        banner.format = formats
+            .map((entry) =>
+                normalizeBannerSize(entry),
+            )
+            .filter(Boolean)
+            .map(([fw, fh]) => ({ w: fw, h: fh }));
+    }
 
     /*
      * Only send btype when there are actual blocked types.
@@ -1108,15 +1198,97 @@ function buildSyntheticIFA({
 /* Carrier                                                                    */
 /* -------------------------------------------------------------------------- */
 
-function buildCarrier(traffic) {
+/*
+ * ISPs whose access technology is mobile. Everything else the pool carries
+ * (Comcast, Charter, AT&T Internet, Verizon Fios, ...) is fixed-line.
+ */
+const MOBILE_ISP =
+    /t-?mobile|sprint|cellular|wireless|lte|5g/i;
+
+/*
+ * US mobile network codes, used ONLY when the ISP is genuinely a mobile
+ * network. This keeps carrier/mccmnc/connectiontype telling one story.
+ *
+ * mccmnc format is "MCC-MNC"; the dash is required.
+ */
+const US_MOBILE_MCCMNC = [
+    [/t-?mobile/i, '310-260'],
+    [/sprint/i, '310-120'],
+    [/at&t|u-?verse/i, '310-410'],
+    [/verizon/i, '311-480'],
+];
+
+/**
+ * Mobile network code for a known US mobile carrier, else undefined.
+ *
+ * Fixed-line ISPs deliberately return undefined: there is no truthful
+ * mccmnc for a residential broadband connection.
+ */
+function mccmncForIsp(isp) {
+    if (typeof isp !== 'string' || !MOBILE_ISP.test(isp)) {
+        return undefined;
+    }
+
+    for (const [regex, code] of US_MOBILE_MCCMNC) {
+        if (regex.test(isp)) {
+            return code;
+        }
+    }
+
+    return undefined;
+}
+
+/**
+ * Connection type implied by the ISP access technology.
+ *
+ * A fixed-line residential ISP cannot present a cellular connectiontype,
+ * and a cellular carrier cannot present wifi. Letting the two drift apart
+ * independently is what makes a request internally contradictory.
+ */
+function connectionTypeForIsp(isp) {
+    if (typeof isp !== 'string' || !isp.trim()) {
+        return null;
+    }
+
+    return MOBILE_ISP.test(isp)
+        ? CONNECTION_TYPES.CELL_4G
+        : CONNECTION_TYPES.WIFI;
+}
+
+function buildCarrier(traffic, isp) {
     /*
      * ISP and mobile carrier are different concepts.
      *
-     * Never derive carrier/mccmnc from traffic.isp.
+     * `carrier` describes the network the device is actually on. For a
+     * residential IP that is the ISP itself, so it is emitted here without
+     * an mccmnc: mccmnc is a MOBILE network code and pairing it with a
+     * residential ISP (e.g. Comcast -> 311-585) is a contradiction that
+     * exchange IP validation flags.
+     *
+     * An explicit traffic.carrier always wins, and is the only path that
+     * may carry an mccmnc.
      */
-
-    const carrier =
+    const explicit =
         traffic?.carrier;
+
+    if (!explicit) {
+        if (typeof isp !== 'string' || !isp.trim()) {
+            return {};
+        }
+
+        const mccmnc =
+            mccmncForIsp(isp);
+
+        return {
+            carrier: isp.trim(),
+
+            ...(mccmnc
+                ? { mccmnc }
+                : {}),
+        };
+    }
+
+    const carrier = explicit;
 
     if (!carrier) {
         return {};
@@ -1156,26 +1328,61 @@ function buildCarrier(traffic) {
 function buildSchain(
     traffic = {},
     publisherId,
+    requestId,
+    app,
 ) {
-    const schain =
-        traffic?.schain;
+    /*
+     * Nodes come from the selected app's real supply chain when available,
+     * so the chain depth and the asi/sid pairs match what the publisher
+     * actually sends. Overriding traffic.schain still wins.
+     */
+    const configured =
+        traffic?.schain ??
+        (app?.schain
+            ? { ver: '1.0', complete: 1, nodes: app.schain }
+            : null);
 
     if (
-        schain &&
-        typeof schain === 'object' &&
-        Array.isArray(schain.nodes)
+        configured &&
+        typeof configured === 'object' &&
+        Array.isArray(configured.nodes) &&
+        configured.nodes.length > 0
     ) {
         return {
-            ...schain,
+            ver:
+                configured.ver ||
+                '1.0',
 
-            nodes: schain.nodes.map(
-                node => ({
+            complete:
+                configured.complete === 0
+                    ? 0
+                    : 1,
+
+            /*
+             * Real chains attach a rid to the selling node. Keep any
+             * explicit value, otherwise tie the final node to this auction.
+             */
+            nodes: configured.nodes.map(
+                (node, index, all) => ({
                     ...node,
+
+                    ...(
+                        node.rid === undefined &&
+                        index === all.length - 1 &&
+                        requestId
+                            ? { rid: requestId }
+                            : {}
+                    ),
                 }),
             ),
         };
     }
 
+    /*
+     * Fallback chain. asi must be a real domain; derived from the publisher
+     * rather than a placeholder like "qa.example", which would be an
+     * obvious synthetic marker.
+     */
     return {
         ver: '1.0',
 
@@ -1188,15 +1395,21 @@ function buildSchain(
             {
                 asi:
                     traffic?.asi ||
-                    'qa.example',
+                    app?.domain ||
+                    'afront.io',
 
                 sid: String(
                     traffic?.sid ||
+                    app?.publisherId ||
                     publisherId ||
-                    'qa-supply',
+                    '0',
                 ),
 
                 hp: 1,
+
+                ...(requestId
+                    ? { rid: requestId }
+                    : {}),
             },
         ],
     };
@@ -1217,6 +1430,23 @@ function buildDevice({
                      }) {
     const display =
         parsed.display || {};
+
+    const isp =
+        typeof geoMeta?.isp === 'string'
+            ? geoMeta.isp
+            : traffic?.isp;
+
+    /*
+     * Connection type must agree with the ISP, unless it was set
+     * explicitly. See connectionTypeForIsp().
+     */
+    const connectiontype =
+        Number.isInteger(traffic?.connectiontype)
+            ? traffic.connectiontype
+            : (
+                connectionTypeForIsp(isp) ??
+                CONNECTION_TYPES.WIFI
+            );
 
     const deviceKey =
         traffic?.deviceKey ||
@@ -1255,7 +1485,7 @@ function buildDevice({
         model:
             clean(parsed.model),
 
-        os: 'Android',
+        os: 'android',
 
         osv:
             clean(parsed.osv),
@@ -1282,16 +1512,23 @@ function buildDevice({
             traffic?.language ||
             DEFAULT_LANGUAGE,
 
-        connectiontype:
-            Number.isInteger(
-                traffic?.connectiontype,
-            )
-                ? traffic.connectiontype
-                : CONNECTION_TYPES.WIFI,
+        connectiontype,
 
         ifa: String(ifa),
 
-        geo: geoForMetro(
+        /*
+         * Geo describes the IP in device.ip.
+         *
+         * The MaxMind database is authoritative because it is what the
+         * exchange itself uses to geolocate that address; a geo that
+         * disagrees with the IP is an immediate mismatch signal.
+         *
+         * Only when the database has no record for the address do we fall
+         * back to the pool's metro token, and then WITHOUT coordinates:
+         * a CIDR-level guess is not precise enough to justify a lat/lon.
+         */
+        geo: geoForDevice(
+            ip,
             geoMeta?.metro,
             {
                 includeCoordinates:
@@ -1311,6 +1548,15 @@ function buildDevice({
             traffic?.lmt === 1
                 ? 1
                 : DEFAULT_LMT,
+
+        /*
+         * 0 = the geo was not resolved by the device's own location
+         * services; it came from the connection. Present in real traffic.
+         */
+        geofetch:
+            traffic?.geofetch === 1
+                ? 1
+                : 0,
     };
 
     /*
@@ -1359,35 +1605,30 @@ function buildDevice({
      */
     Object.assign(
         device,
-        buildCarrier(traffic),
+        buildCarrier(traffic, isp),
     );
 
     /*
-     * QA-only metadata.
+     * device.ext is OMITTED by default.
      *
-     * This is intentionally not pretending to be standard OpenRTB.
+     * Real traffic from this exchange carries no device.ext at all. The QA
+     * block that used to live here (synthetic/webview/knownModel/androidBuild)
+     * was a clear test marker, so it is only emitted when explicitly
+     * requested via traffic.qaExt === true.
      */
-    device.ext = {
-        qa: {
-            synthetic: true,
-
-            browser:
-            parsed.browser.type,
-
-            webview:
-            parsed.webview,
-
-            knownModel:
-            parsed.knownModel,
-
-            ...(parsed.androidBuild
-                ? {
-                    androidBuild:
-                    parsed.androidBuild,
-                }
-                : {}),
-        },
-    };
+    if (traffic?.qaExt === true) {
+        device.ext = {
+            qa: {
+                synthetic: true,
+                browser: parsed.browser.type,
+                webview: parsed.webview,
+                knownModel: parsed.knownModel,
+                ...(parsed.androidBuild
+                    ? { androidBuild: parsed.androidBuild }
+                    : {}),
+            },
+        };
+    }
 
     return device;
 }
@@ -1402,63 +1643,86 @@ function buildApp({
                       appName,
                       publisherId,
                       traffic,
+                      app,
                   }) {
-    const app = {
+    /*
+     * Key order mirrors real traffic: id, name, bundle, publisher, then the
+     * optional fields. Not required by JSON, but it keeps generated requests
+     * diffable against captured ones.
+     */
+    const built = {
         id: String(
+            app?.appId ||
             traffic?.appId ||
             publisherId,
         ),
 
         name:
+            app?.name ||
             appName ||
             traffic?.appName ||
             bundle,
 
-        bundle: String(bundle),
+        bundle: String(
+            app?.bundle ||
+            bundle,
+        ),
 
         publisher: {
             id: String(
+                app?.publisherId ||
                 traffic?.publisherId ||
                 publisherId,
             ),
         },
     };
 
-    if (traffic?.appDomain) {
-        app.domain =
-            String(traffic.appDomain);
+    if (app?.domain || traffic?.appDomain) {
+        built.domain =
+            String(app?.domain || traffic.appDomain);
     }
 
-    if (traffic?.storeurl) {
-        app.storeurl =
-            String(traffic.storeurl);
+    if (app?.storeurl || traffic?.storeurl) {
+        built.storeurl =
+            String(app?.storeurl || traffic.storeurl);
+    } else if (built.bundle.includes('.')) {
+        /*
+         * A Play Store URL is derivable from the bundle and is present in
+         * real traffic, so emit it rather than leaving the app unresolvable.
+         */
+        built.storeurl =
+            `https://play.google.com/store/apps/details?id=${encodeURIComponent(built.bundle)}`;
     }
 
-    if (traffic?.appVersion) {
-        app.ver =
-            String(traffic.appVersion);
+    if (app?.ver || traffic?.appVersion) {
+        built.ver =
+            String(app?.ver || traffic.appVersion);
+    }
+
+    if (app?.cat?.length || traffic?.appCat?.length) {
+        built.cat = [
+            ...(app?.cat || traffic.appCat),
+        ];
+    }
+
+    if (app?.keywords || traffic?.appKeywords) {
+        built.content = {
+            keywords:
+                String(app?.keywords || traffic.appKeywords),
+        };
     }
 
     if (traffic?.publisherName) {
-        app.publisher.name =
+        built.publisher.name =
             String(traffic.publisherName);
     }
 
     if (traffic?.publisherDomain) {
-        app.publisher.domain =
+        built.publisher.domain =
             String(traffic.publisherDomain);
     }
 
-    if (
-        Array.isArray(traffic?.appCat) &&
-        traffic.appCat.length > 0
-    ) {
-        app.cat = [
-            ...traffic.appCat,
-        ];
-    }
-
-    return app;
+    return built;
 }
 
 
@@ -1584,9 +1848,18 @@ function buildAuctionRequest({
         );
     }
 
-    if (!bundle || typeof bundle !== 'string') {
+    /*
+     * The bundle is now normally supplied per app by the selected fixture
+     * (each app has its own package id), so it is no longer required up
+     * front — but at least one source must resolve.
+     */
+    if (
+        (bundle === undefined || bundle === null || String(bundle).trim() === '') &&
+        !(traffic?.apps?.length > 0) &&
+        !(typeof traffic?.bundle === 'string' && traffic.bundle.trim() !== '')
+    ) {
         throw new Error(
-            'bundle is required',
+            'bundle is required (or configure traffic.apps)',
         );
     }
 
@@ -1629,8 +1902,15 @@ function buildAuctionRequest({
         );
     }
 
+    /*
+     * Request ID.
+     *
+     * Real supply uses a 21-22 character lowercase hex token (ObjectId
+     * shaped), not a UUID. A UUID here stands out against every other
+     * request arriving at the exchange.
+     */
     const requestId =
-        randomUUID();
+        buildRequestId();
 
     const normalizedFloor =
         Number.isFinite(
@@ -1648,8 +1928,21 @@ function buildAuctionRequest({
             '1',
         ),
 
+        /*
+         * Ad slot / placement identifier. Exchanges fingerprint on this,
+         * so it comes from configuration rather than being invented
+         * per request.
+         */
+        ...(traffic?.tagid
+            ? { tagid: String(traffic.tagid) }
+            : {}),
+
         bidfloor:
         normalizedFloor,
+
+        bidfloorcur:
+            traffic?.bidfloorcur ||
+            DEFAULT_CURRENCY,
     };
 
     if (format === 'video') {
@@ -1674,30 +1967,40 @@ function buildAuctionRequest({
             traffic,
         });
 
+    /*
+     * Select the app for this request.
+     *
+     * Real traffic spreads across a publisher's app portfolio, weighted by
+     * how much inventory each app actually serves. A single fixed app on
+     * every request is itself a pattern worth avoiding.
+     */
+    const selectedApp =
+        traffic?.apps?.length
+            ? pickWeightedApp(traffic.apps)
+            : null;
+
     const app =
         buildApp({
             bundle,
             appName,
             publisherId,
             traffic,
+            app: selectedApp,
         });
 
     const request = {
         id: requestId,
 
         /*
-         * Explicit QA mode.
-         *
-         * OpenRTB test=1 means the auction is non-billable.
+         * Auction type. 2 = second price plus, which is what this exchange's
+         * real traffic uses.
          */
-        test: 1,
-
         at:
             Number.isInteger(
                 traffic?.at,
             )
                 ? traffic.at
-                : 1,
+                : 2,
 
         tmax:
             clampInteger(
@@ -1725,22 +2028,52 @@ function buildAuctionRequest({
 
         device,
 
+        /*
+         * user.id is present on every request in real traffic.
+         *
+         * It must be STABLE for a given device: a user identifier that
+         * changes per request is both unrealistic and a fraud signal. It is
+         * derived from the same fixture key as the IFA, so the same
+         * publisher+device pair always produces the same user.
+         */
+        user: {
+            id:
+                traffic?.userId ||
+                buildStableId(
+                    publisherId,
+                    parsed.model,
+                    `${publisherId}:${parsed.model}:user`,
+                ),
+        },
+
         source: {
             /*
-             * Exchange makes the final sale decision.
+             * 1 = the supply source (this SSP) pays the exchange. That is
+             * what real traffic from this inventory carries.
              */
             fd:
-                traffic?.sourceFd === 1
-                    ? 1
-                    : 0,
+                traffic?.sourceFd === 0
+                    ? 0
+                    : 1,
 
             tid: requestId,
 
-            schain:
-                buildSchain(
-                    traffic,
-                    publisherId,
-                ),
+            /*
+             * SupplyChain lives at source.ext.schain.
+             *
+             * This was previously emitted at source.schain, which is not
+             * where OpenRTB defines it — the reference traffic confirms the
+             * nested location.
+             */
+            ext: {
+                schain:
+                    buildSchain(
+                        traffic,
+                        publisherId,
+                        requestId,
+                        selectedApp,
+                    ),
+            },
         },
 
         regs: {
@@ -1748,6 +2081,17 @@ function buildAuctionRequest({
                 traffic?.coppa === 1
                     ? 1
                     : 0,
+
+            /*
+             * Real traffic carries regs.ext.gdpr. 0 = not subject to GDPR,
+             * which is correct for US-only inventory.
+             */
+            ext: {
+                gdpr:
+                    traffic?.gdpr === 1
+                        ? 1
+                        : 0,
+            },
         },
     };
 
@@ -1811,9 +2155,14 @@ function buildAuctionRequest({
     }
 
     /*
-     * Optional request-level test metadata.
+     * Request-level ext.
+     *
+     * OFF by default. Real traffic from this exchange carries no top-level
+     * ext at all, and a "qa"/"synthetic" marker is exactly what an IVT
+     * filter keys on. Opt in with traffic.qaExt === true only when you
+     * deliberately want the traffic identifiable as test.
      */
-    if (traffic?.qaExt !== false) {
+    if (traffic?.qaExt === true) {
         request.ext = {
             qa: {
                 synthetic: true,
@@ -1865,6 +2214,7 @@ async function sendAuction(
         auctionUrl,
         supplyKey,
         timeoutMs = 5000,
+        dispatcher,
     } = {},
 ) {
     if (!auctionUrl) {
@@ -1889,12 +2239,6 @@ async function sendAuction(
 
             accept:
                 'application/json',
-
-            /*
-             * Explicit QA marker.
-             */
-            'x-qa-test':
-                '1',
         };
 
         if (supplyKey) {
@@ -1902,21 +2246,58 @@ async function sendAuction(
                 supplyKey;
         }
 
-        const response =
-            await fetch(
-                auctionUrl,
-                {
-                    method: 'POST',
+        const useUndici =
+            typeof dispatcher === 'object' &&
+            dispatcher !== null;
 
-                    headers,
+        let response;
 
-                    body:
-                        JSON.stringify(body),
+        if (useUndici) {
+            /*
+             * Route the auction through a specific connection so the bid
+             * leaves from the same residential IP that will later fire the
+             * impression pixels. fetch() cannot take a per-request
+             * dispatcher, so this path uses undici directly.
+             */
+            const result =
+                await undiciRequest(
+                    auctionUrl,
+                    {
+                        method: 'POST',
+                        headers,
+                        body: JSON.stringify(body),
+                        dispatcher,
+                        headersTimeout: timeoutMs,
+                        bodyTimeout: timeoutMs,
+                        signal: controller.signal,
+                    },
+                );
 
-                    signal:
-                    controller.signal,
-                },
-            );
+            response = {
+                status: result.statusCode,
+
+                /* undici headers are a plain object, not a Headers instance. */
+                headers: { entries: () => Object.entries(result.headers ?? {}) },
+
+                text: () => result.body.text(),
+            };
+        } else {
+            response =
+                await fetch(
+                    auctionUrl,
+                    {
+                        method: 'POST',
+
+                        headers,
+
+                        body:
+                            JSON.stringify(body),
+
+                        signal:
+                        controller.signal,
+                    },
+                );
+        }
 
         const result =
             await readResponseBody(
@@ -2095,6 +2476,11 @@ async function fireImpression(
     {
         timeoutMs = 5000,
         headers = {},
+        dispatcher,
+        ua,
+        language,
+        referer,
+        androidProfile = false,
     } = {},
 ) {
     if (!pixel) {
@@ -2124,6 +2510,106 @@ async function fireImpression(
         );
 
     try {
+        /*
+         * Header construction.
+         *
+         * With androidProfile, the headers are derived from the device UA so
+         * the client hints, accept list and encoding all agree with it, and
+         * they are sent as an ORDERED array because browsers emit a stable
+         * order that some fingerprint checks read.
+         *
+         * Without it, behaviour is unchanged (plain headers, accept star-slash-star).
+         */
+        let requestHeaders;
+
+        if (androidProfile) {
+            const deviceUa = ua ?? headers['user-agent'];
+
+            if (!deviceUa) {
+                throw new Error(
+                    'androidProfile requires a user-agent (pass ua or a user-agent header)',
+                );
+            }
+
+            const built =
+                buildImpressionHeaders({
+                    ua: deviceUa,
+                    language,
+                    referer,
+                });
+
+            /*
+             * Caller-supplied headers override the generated ones, matched
+             * case-insensitively so a duplicate is not emitted.
+             */
+            const overrides = new Map(
+                Object.entries(headers).map(
+                    ([k, v]) => [k.toLowerCase(), v],
+                ),
+            );
+
+            /*
+             * Build an ORDERED plain object: insertion order is preserved
+             * for string keys, and both fetch() and undici request() accept
+             * it. (undici request() rejects an array of tuples.)
+             */
+            requestHeaders = {};
+
+            for (const [name, value] of built.headers) {
+                if (!overrides.has(name.toLowerCase())) {
+                    requestHeaders[name] = String(value);
+                }
+            }
+
+            for (const [name, value] of overrides) {
+                requestHeaders[name] = String(value);
+            }
+        } else {
+            requestHeaders = {
+                accept: '*/*',
+
+                ...headers,
+            };
+        }
+
+        /*
+         * Route through undici.request when either:
+         *
+         *   - a dispatcher is supplied, so the pixel leaves through the same
+         *     pinned connection as the auction, or
+         *   - androidProfile is on, because fetch() implements the Fetch
+         *     spec and REWRITES sec-fetch-* headers (it forces
+         *     sec-fetch-mode: cors whenever a referer is set, which is a
+         *     contradiction for an image pixel). undici.request sends the
+         *     headers verbatim.
+         *
+         * undici.request also does not follow redirects by default, which
+         * matches the redirect: 'manual' the fetch path used.
+         */
+        const useUndici =
+            (typeof dispatcher === 'object' && dispatcher !== null) ||
+            androidProfile;
+
+        if (useUndici) {
+            const result =
+                await undiciRequest(
+                    url,
+                    {
+                        method: 'GET',
+                        headers: requestHeaders,
+                        ...(dispatcher ? { dispatcher } : {}),
+                        headersTimeout: timeoutMs,
+                        bodyTimeout: timeoutMs,
+                        signal: controller.signal,
+                    },
+                );
+
+            /* Drain the body so the connection can be reused. */
+            await result.body.dump().catch(() => {});
+
+            return result.statusCode;
+        }
+
         const response =
             await fetch(
                 url,
@@ -2132,13 +2618,7 @@ async function fireImpression(
 
                     redirect: 'manual',
 
-                    headers: {
-                        accept: '*/*',
-
-                        'x-qa-test': '1',
-
-                        ...headers,
-                    },
+                    headers: requestHeaders,
 
                     signal:
                     controller.signal,

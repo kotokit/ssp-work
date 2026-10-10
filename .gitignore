@@ -1,6 +1,9 @@
 node_modules/
 data/ip_pool.json
+data/*.mmdb
+data/us_ip_pool.json
 *.log
+logs/
 config/*.local.json
 .env
 config/supply-key.txt
