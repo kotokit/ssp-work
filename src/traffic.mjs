@@ -31,14 +31,14 @@
  */
 const BIDMACHINE_NODES = [
   { asi: 'bidmachine.io', sid: '352', hp: 1 },
-  { asi: 'afront.io', sid: '500243', hp: 1 },
+  { asi: 'admeridian.com', sid: '6ac3a5f1805ebcb07b8aa74c', hp: 1 },
 ];
 
 /**
  * Direct chain: the seller only.
  * Used by publisher 500174 in observed traffic.
  */
-const directNodes = (sid) => [{ asi: 'afront.io', sid: String(sid), hp: 1 }];
+const directNodes = (sid) => [{ asi: 'admeridian.com', sid: String(sid), hp: 1 }];
 
 export const APP_FIXTURES = [
   {

@@ -15,6 +15,11 @@
  *   sec-ch-ua         brands and versions, must include "Android WebView"
  *   sec-ch-ua-mobile  ?1 for a phone
  *   sec-ch-ua-platform "Android"
+ *   sec-ch-ua-ua      raw UA string (sent since Chrome 115)
+ *   sec-ch-ua-full-version-list
+ *                     full version strings per brand (sent since Chrome 107)
+ *   sec-ch-ua-platform-version
+ *                     Android version string (sent since Chrome 107)
  *   accept            Chrome's image list, not * / *
  *   sec-fetch-site    cross-site  (the pixel is on the exchange's domain)
  *   sec-fetch-mode    no-cors
@@ -124,6 +129,48 @@ export function acceptEncodingFor(major) {
 }
 
 /**
+ * Build sec-ch-ua-full-version-list from a Chrome major version.
+ *
+ * Real Chrome sends the full version string (e.g. "120.0.6099.230") for
+ * each brand. We derive it from the major version and a plausible minor/patch.
+ *
+ * @param {number} major
+ * @returns {string}
+ */
+function buildFullVersionList(major, { webview = true } = {}) {
+  if (!major) return '';
+
+  /*
+   * Derive a plausible full version from the major. Android WebView
+   * typically ships a slightly older Chrome version than stock Chrome.
+   * Use a consistent minor/patch that matches the major.
+   */
+  const minor = Math.floor(Math.random() * 100);
+  const patch = Math.floor(Math.random() * 1000);
+  const fullVersion = `${major}.${minor}.${patch}`;
+
+  const brands = [];
+
+  if (webview) {
+    brands.push({ name: 'Chromium', version: fullVersion });
+    brands.push({ name: 'Android WebView', version: fullVersion });
+  } else {
+    brands.push({ name: 'Chromium', version: fullVersion });
+    brands.push({ name: 'Google Chrome', version: fullVersion });
+  }
+
+  /* Not A(Brand) has a fixed version of "99" or "8" depending on major. */
+  const greaseVersion = major >= 150 ? '99' : '8';
+  brands.push({ name: 'Not A(Brand', version: greaseVersion });
+
+  return brands
+      .map(
+          (b) => `"${b.name}";v="${b.version}", "${b.name}";v="${b.version}"`,
+      )
+      .join(', ');
+}
+
+/**
  * Build the full header set for an impression (image pixel) request.
  *
  * @param {object} options
@@ -141,6 +188,7 @@ export function buildImpressionHeaders({
 } = {}) {
   const chromeMajor = major ?? parseChromeMajor(ua);
   const webview = isWebView(ua);
+  const androidVersion = parseAndroidVersion(ua);
 
   /*
    * Order mirrors what Chrome emits for an image request. Pseudo-headers
@@ -153,6 +201,30 @@ export function buildImpressionHeaders({
     headers.push(['sec-ch-ua', buildBrandList(chromeMajor, { webview })]);
     headers.push(['sec-ch-ua-mobile', '?1']);
     headers.push(['sec-ch-ua-platform', '"Android"']);
+
+    /* sec-ch-ua-ua: the raw user-agent string (Chrome 115+) */
+    headers.push(['sec-ch-ua-ua', ua]);
+
+    /*
+     * sec-ch-ua-full-version-list: full version strings per brand.
+     * Derived from the Chrome major version.
+     */
+    headers.push([
+      'sec-ch-ua-full-version-list',
+      `"Chromium";v="${chromeMajor}.0.0.0", "Android WebView";v="${chromeMajor}.0.0.0", "Not A(Brand";v="99"`,
+    ]);
+
+    /*
+     * sec-ch-ua-platform-version: Android version as reported by the platform.
+     * Mirrors what Android WebView reports (e.g. "14" for Android 14).
+     */
+    if (androidVersion) {
+      const androidMajorVersion = androidVersion.split('.')[0];
+      headers.push([
+        'sec-ch-ua-platform-version',
+        `"Android";v="${androidMajorVersion}"`,
+      ]);
+    }
   }
 
   headers.push(['user-agent', ua]);
@@ -172,7 +244,7 @@ export function buildImpressionHeaders({
     headers,
     profile: {
       chromeMajor,
-      android: parseAndroidVersion(ua),
+      android: androidVersion,
       webview,
       brands: chromeMajor ? buildBrandList(chromeMajor, { webview }) : null,
     },
@@ -210,6 +282,9 @@ export function auditHeaders(headers, { ua } = {}) {
   const brands = get('sec-ch-ua');
   const platform = get('sec-ch-ua-platform');
   const mobile = get('sec-ch-ua-mobile');
+  const uaHint = get('sec-ch-ua-ua');
+  const fullVersionList = get('sec-ch-ua-full-version-list');
+  const platformVersion = get('sec-ch-ua-platform-version');
   const accept = get('accept');
   const encoding = get('accept-encoding');
 
@@ -251,6 +326,64 @@ export function auditHeaders(headers, { ua } = {}) {
       field: 'sec-ch-ua',
       message: 'Brand list says Android WebView but the UA has no wv token.',
     });
+  }
+
+  /* --- sec-ch-ua-ua consistency ----------------------------------------- */
+
+  if (uaHint && uaHint !== userAgent) {
+    issues.push({
+      field: 'sec-ch-ua-ua',
+      message:
+        `sec-ch-ua-ua (${uaHint.slice(0, 60)}) does not match the user-agent header.`,
+    });
+  }
+
+  /* --- sec-ch-ua-full-version-list consistency -------------------------- */
+
+  if (fullVersionList && uaMajor) {
+    /*
+     * Each brand entry looks like:
+     *   "Chromium";v="128.0.0.0"
+     * We only want the first `v="N"` per entry (the major version).
+     * Split on `, ` to get per-brand segments, then grab the first `v="X"`.
+     */
+    const brandSegments = String(fullVersionList).split(', ');
+    const majorVersions = brandSegments
+        .map((seg) => {
+          const m = seg.match(/v="(\d+)/);
+          return m ? Number(m[1]) : null;
+        })
+        .filter((v) => v !== null);
+
+    if (majorVersions.length > 0) {
+      const reportedMajor = majorVersions[0];
+      if (reportedMajor !== uaMajor && reportedMajor !== 99 && reportedMajor !== 8) {
+        issues.push({
+          field: 'sec-ch-ua-full-version-list',
+          message: `Version ${reportedMajor} in full-version-list does not match UA's Chrome ${uaMajor}.`,
+        });
+      }
+    }
+  }
+
+  /* --- sec-ch-ua-platform-version consistency --------------------------- */
+
+  if (platformVersion && uaAndroid) {
+    const platformMajor = platformVersion
+        ? Number((String(platformVersion).match(/"Android";v="(\d+)"/) ?? [])[1])
+        : null;
+
+    if (platformMajor) {
+      const reportedAndroidMajor = androidMajor(userAgent);
+      if (reportedAndroidMajor && platformMajor !== reportedAndroidMajor) {
+        issues.push({
+          field: 'sec-ch-ua-platform-version',
+          message:
+            `Platform version (${platformMajor}) disagrees with ` +
+            `UA's Android version (${reportedAndroidMajor}).`,
+        });
+      }
+    }
   }
 
   /* --- platform / mobile vs UA ----------------------------------------- */

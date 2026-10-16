@@ -32,6 +32,10 @@ import {
 
 import {
     buildImpressionHeaders,
+    parseChromeMajor,
+    isWebView,
+    buildBrandList,
+    acceptEncodingFor,
 } from './android-headers.mjs';
 
 import {
@@ -591,10 +595,6 @@ function parseWebViewVersion(ua) {
     return match
         ? match[1]
         : null;
-}
-
-function isWebView(ua) {
-    return /;\s*wv(?:[;\s)]|$)/i.test(ua);
 }
 
 function parseBuild(ua) {
@@ -1396,7 +1396,7 @@ function buildSchain(
                 asi:
                     traffic?.asi ||
                     app?.domain ||
-                    'afront.io',
+                    'admeridian.com',
 
                 sid: String(
                     traffic?.sid ||
@@ -2213,6 +2213,7 @@ async function sendAuction(
     {
         auctionUrl,
         supplyKey,
+        ua,
         timeoutMs = 5000,
         dispatcher,
     } = {},
@@ -2233,6 +2234,21 @@ async function sendAuction(
         );
 
     try {
+        /*
+         * Build a header set that matches Android WebView's HTTP/2 request.
+         *
+         * Without a real browser, undici sends a minimal set of headers.
+         * A real Android WebView request carries:
+         *   - user-agent (already in the corpus string)
+         *   - sec-ch-ua brand list (must agree with UA's Chrome version)
+         *   - sec-ch-ua-mobile, sec-ch-ua-platform
+         *   - accept-encoding with zstd for Chrome 123+
+         *   - sec-fetch-* metadata (set by the fetch API / WebView)
+         *   - accept-language
+         *
+         * These headers make the auction request fingerprint indistinguishable
+         * from a genuine Android WebView bid request.
+         */
         const headers = {
             'content-type':
                 'application/json',
@@ -2244,6 +2260,27 @@ async function sendAuction(
         if (supplyKey) {
             headers['x-supply-key'] =
                 supplyKey;
+        }
+
+        if (ua) {
+            const chromeMajor = parseChromeMajor(ua);
+            const webview = isWebView(ua);
+
+            if (chromeMajor) {
+                headers['user-agent'] = ua;
+                headers['sec-ch-ua'] = buildBrandList(chromeMajor, { webview });
+                headers['sec-ch-ua-mobile'] = '?1';
+                headers['sec-ch-ua-platform'] = '"Android"';
+                headers['accept-encoding'] = acceptEncodingFor(chromeMajor);
+            } else {
+                headers['user-agent'] = ua;
+                headers['accept-encoding'] = 'gzip, deflate, br';
+            }
+
+            headers['sec-fetch-site'] = 'same-site';
+            headers['sec-fetch-mode'] = 'no-cors';
+            headers['sec-fetch-dest'] = 'empty';
+            headers['accept-language'] = 'en-US,en;q=0.9';
         }
 
         const useUndici =

@@ -39,6 +39,86 @@ import { getProxyCredentials } from './pr.mjs';
 import { getGeoDetail } from './geo.mjs';
 
 /**
+ * TLS configuration that matches Chrome Android's ClientHello.
+ *
+ * This tunes undici's TLS settings so the TCP-level fingerprint
+ * (JA3/JA4) of the auction and pixel requests is indistinguishable
+ * from a real Android WebView making the same request.
+ *
+ * Key parameters:
+ *   - ciphers: Chrome Android's cipher suite order
+ *   - sigalgs: signature algorithms Chrome advertises
+ *   - keyShareGroups: x25519 + secp256r1 (Chrome's key_share)
+ *   - supportedVersion: TLS 1.3 only (Chrome drops 1.2 on Android)
+ *   - compressCertificates: true (Chrome compresses cert chains)
+ *
+ * See: https://crypto.stackexchange.com/a/97183 (JA3 methodology)
+ */
+export function buildTlsConfig() {
+  return {
+    /*
+     * Chrome Android cipher suites (TLS 1.3 only, in Chrome's order).
+     * These are the cipher suites Chrome advertises in its ClientHello.
+     */
+    ciphers: [
+      'TLS_AES_128_GCM_SHA256',
+      'TLS_AES_256_GCM_SHA384',
+      'TLS_CHACHA20_POLY1305_SHA256',
+    ].join(':'),
+
+    /*
+     * Signature algorithms Chrome advertises in signature_algorithms.
+     * These are the hash+signature combinations Chrome supports.
+     */
+    sigalgs: [
+      'ecdsa_secp256r1_sha256',
+      'rsa_pss_rsae_sha256',
+      'rsa_pkcs1_sha256',
+      'ecdsa_secp384r1_sha384',
+      'rsa_pss_rsae_sha384',
+      'rsa_pkcs1_sha384',
+      'rsa_pss_rsae_sha512',
+      'rsa_pkcs1_sha512',
+    ].join(':'),
+
+    /*
+     * Key share groups Chrome advertises in key_share.
+     * Chrome always sends x25519 first, then secp256r1.
+     */
+    keyShareGroups: [
+      'X25519',
+      'secp256r1',
+    ],
+
+    /*
+     * Supported versions Chrome advertises.
+     * Chrome Android sends TLS 1.3 + 1.2 in supported_versions.
+     */
+    supportedVersion: ['TLS1_3', 'TLS1_2'],
+
+    /*
+     * Compress certificates — Chrome enables cert compression (RFC 8879).
+     */
+    compressCertificates: true,
+  };
+}
+
+/**
+ * Apply TLS config to an undici Dispatcher options object.
+ *
+ * undici's ProxyAgent accepts a `tls` option that is passed to
+ * tls.connect() for the CONNECT tunnel. We use this to set the
+ * cipher suites, signature algorithms, and key share groups that
+ * determine the TLS ClientHello fingerprint.
+ */
+function applyTlsToDispatcher(dispatcherOptions, tlsConfig) {
+  return {
+    ...dispatcherOptions,
+    tls: tlsConfig,
+  };
+}
+
+/**
  * Endpoint used to discover the exit IP of a candidate connection.
  *
  * Deliberately a plain-text echo, not a JSON geo service. Geo comes from the
@@ -178,6 +258,7 @@ export async function openUsSession({
       uri: proxyUrl,
       connections: 1,
       pipelining: 1,
+      tls: buildTlsConfig(),
     });
 
     try {
@@ -264,6 +345,7 @@ export async function openUsSession({
        */
       connections: 1,
       pipelining: 1,
+      tls: buildTlsConfig(),
     });
 
     live.add(agent);
@@ -426,6 +508,7 @@ export async function openPooledSession(entry, {
     uri: `http://${credentials.user}:${password}@${credentials.host}:${credentials.port}`,
     connections: 1,
     pipelining: 1,
+    tls: buildTlsConfig(),
   });
 
   try {

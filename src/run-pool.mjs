@@ -272,6 +272,7 @@ async function main() {
         const result = await sendAuction(body, {
           auctionUrl,
           supplyKey: '',
+          ua,
           dispatcher: local ? undefined : session.dispatcher,
         });
 
@@ -331,9 +332,10 @@ async function main() {
             }
           } else {
             const status = await fireImpression(pixel, {
+              ua,
+              androidProfile: true,
               dispatcher: local ? undefined : session.dispatcher,
               headers: {
-                'user-agent': ua,
                 'x-forwarded-for': session.ip,
               },
             });

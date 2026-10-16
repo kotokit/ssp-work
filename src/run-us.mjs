@@ -270,6 +270,7 @@ async function main() {
     const result = await sendAuction(body, {
       auctionUrl,
       supplyKey: '',
+      ua,
       dispatcher: local ? undefined : session.dispatcher,
     });
 
@@ -306,12 +307,15 @@ async function main() {
     try {
       /*
        * THE POINT: the pixel goes out through session.dispatcher, the same
-       * pinned connection that sent the bid.
+       * pinned connection that sent the bid. Pass androidProfile=true so
+       * the headers (sec-ch-ua, accept, accept-encoding, sec-fetch-*)
+       * are built from the UA and sent via undici.
        */
       const status = await fireImpression(pixel, {
+        ua,
+        androidProfile: true,
         dispatcher: local ? undefined : session.dispatcher,
         headers: {
-          'user-agent': ua,
           'x-forwarded-for': session.ip,
         },
       });

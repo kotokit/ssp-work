@@ -852,6 +852,7 @@ function main() {
         result = await sendAuction(body, {
           auctionUrl,
           supplyKey,
+          ua,
         });
       } finally {
         auctionLatency.add(
@@ -898,13 +899,17 @@ function main() {
             /*
              * Fire from the same simulated device: same IP and same UA as
              * the auction request, so the exchange can match the impression
-             * back to the bid it served.
+             * back to the bid it served. Pass androidProfile=true so the
+             * headers (sec-ch-ua, accept, accept-encoding, sec-fetch-*)
+             * are built from the UA and sent via undici (not fetch),
+             * which avoids fetch's sec-fetch-* rewriting.
              */
             const impressionStatus = await fireImpression(pixel, {
+              ua,
+              androidProfile: true,
               headers: {
                 'x-forwarded-for': ip,
                 'x-real-ip': ip,
-                'user-agent': ua,
               },
             });
 
