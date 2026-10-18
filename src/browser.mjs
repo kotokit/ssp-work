@@ -237,9 +237,20 @@ export class PixelShooter {
       });
 
       const wireHeaders = new Map();
+      const tlsInfo = { protocol: null, securityState: null };
 
       cdp.on('Network.requestWillBeSentExtraInfo', (event) => {
         wireHeaders.set(event.requestId, event.headers);
+
+        /*
+         * Capture TLS protocol info from the first request that reports
+         * it. This is used to construct an x-adx-tls header for the
+         * impression path.
+         */
+        if (event.security && !tlsInfo.protocol) {
+          tlsInfo.protocol = event.security.protocol ?? null;
+          tlsInfo.securityState = event.security.securityState ?? null;
+        }
       });
 
       cdp.on('Fetch.requestPaused', (event) => {
@@ -341,6 +352,7 @@ export class PixelShooter {
         status: pixelHits.find((h) => h.status)?.status,
         requests: captured,
         pixelHits,
+        tlsInfo,
       };
     } catch (error) {
       return { ok: false, error: String(error?.message ?? error), requests: captured };

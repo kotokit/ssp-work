@@ -62,8 +62,6 @@ import {
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
 
-const WIN_FLOOR = 0.01;
-const LOSE_FLOOR = 0.1;
 const DEFAULT_MAX_IN_FLIGHT = 50;
 const LATENCY_SAMPLE_LIMIT = 10_000;
 const LOG_INTERVAL_MS = 3_000;
@@ -378,6 +376,30 @@ function main() {
     throw new Error('Duration is too large');
   }
 
+  /* ------------------------------------------------------------------------ */
+  /* cpmRange: bid floor for winnable vs non-winnable auctions                */
+  /* ------------------------------------------------------------------------ */
+
+  const cpmRange =
+      cfg.load?.cpmRange ??
+      { min: 0.01, max: 0.10 };
+
+  const bidFloorWin = Number(
+      cpmRange.min ?? 0.01,
+  );
+  const bidFloorLose = Number(
+      cpmRange.max ?? 0.10,
+  );
+
+  if (
+      !Number.isFinite(bidFloorWin) ||
+      bidFloorWin < 0 ||
+      !Number.isFinite(bidFloorLose) ||
+      bidFloorLose < 0
+  ) {
+    throw new Error('cpmRange.min/max must be non-negative numbers');
+  }
+
   const format =
       args.values.get('--format') ??
       cfg.traffic.formats?.[0] ??
@@ -393,6 +415,45 @@ function main() {
 
   const verbose = args.flags.has('--verbose');
   const quiet = args.flags.has('--quiet');
+
+  /* ------------------------------------------------------------------------ */
+  /* Diurnal scheduling pattern                                               */
+  /* ------------------------------------------------------------------------ */
+
+  const diurnalMode = cfg.load?.diurnal ?? 'flat';
+
+  /**
+   * Diurnal multiplier for the base QPS.
+   *
+   * 'flat' returns 1 at all times.
+   * 'us-eastern' applies a daytime-peak curve based on US Eastern time,
+   *   peaking around 14:00–18:00 ET and dipping to ~0.2 at 04:00–06:00 ET.
+   * 'us-central' applies the same shape shifted to US Central time.
+   * A numeric value (0..1) overrides the curve for the entire run.
+   */
+  function diurnalMultiplier(now = new Date()) {
+    if (typeof diurnalMode === 'number' && diurnalMode >= 0 && diurnalMode <= 1) {
+      return diurnalMode;
+    }
+
+    const utcHour = now.getUTCHours() + now.getTimezoneOffset() / 60;
+
+    const hours = {
+      'us-eastern': utcHour + 4,
+      'us-central': utcHour + 5,
+    }[diurnalMode] ?? utcHour;
+
+    const h = ((hours % 24) + 24) % 24;
+
+    /*
+     * Smooth sinusoidal curve: peak at 16:00 local, trough at 04:00 local.
+     * Range is [0.15, 1.0].
+     */
+    const phase = ((h - 4) / 24) * 2 * Math.PI;
+    return 0.625 + 0.375 * Math.cos(phase);
+  }
+
+  const effectiveQps = () => Math.max(1, Math.round(qps * diurnalMultiplier()));
 
   /* ------------------------------------------------------------------------ */
   /* Request body logging                                                     */
@@ -803,7 +864,7 @@ function main() {
         appName,
         publisherId: seller.publisherId,
         format,
-        bidfloor: winnable ? WIN_FLOOR : LOSE_FLOOR,
+        bidfloor: winnable ? bidFloorWin : bidFloorLose,
         geoMeta: {
           isp: endpoint.isp,
           metro: endpoint.metro,
@@ -903,10 +964,14 @@ function main() {
              * headers (sec-ch-ua, accept, accept-encoding, sec-fetch-*)
              * are built from the UA and sent via undici (not fetch),
              * which avoids fetch's sec-fetch-* rewriting.
+             *
+             * Pass tlsFacts={} so buildTlsFactsHeader() uses the default
+             * Chrome Android TLS fingerprint for the x-adx-tls header.
              */
             const impressionStatus = await fireImpression(pixel, {
               ua,
               androidProfile: true,
+              tlsFacts: {},
               headers: {
                 'x-forwarded-for': ip,
                 'x-real-ip': ip,
@@ -961,12 +1026,15 @@ function main() {
     }
   }
 
-  // Fixed-rate scheduler without token accumulation or catch-up bursts.
+  // Diurnal-aware scheduler without token accumulation or catch-up bursts.
   //
   // A request is launched only when its scheduled time arrives and capacity
   // is available. If the worker is saturated, the schedule is reset instead
   // of attempting to catch up with a burst of queued requests.
-  const intervalMs = 1000 / qps;
+  //
+  // The effective QPS is modulated by the diurnal multiplier so that launch
+  // rate follows a smooth US-time-of-day curve (peak near 16:00 ET, trough
+  // near 04:00 ET) when diurnal mode is enabled.
   let nextDue = performance.now();
 
   function scheduleNext() {
@@ -990,11 +1058,15 @@ function main() {
     const now = performance.now();
 
     if (inFlight < maxInFlight && now >= nextDue) {
+      const currentQps = effectiveQps();
+      const intervalMs = 1000 / currentQps;
       // Do not accumulate missed ticks. Schedule the next launch relative
       // to the current time to avoid catch-up bursts after event-loop stalls.
       nextDue = now + intervalMs;
       void attempt();
     } else if (inFlight >= maxInFlight) {
+      const currentQps = effectiveQps();
+      const intervalMs = 1000 / currentQps;
       // Check capacity again soon, without creating a backlog.
       nextDue = now + Math.min(intervalMs, 10);
     }
