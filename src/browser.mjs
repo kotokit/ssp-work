@@ -123,6 +123,39 @@ function searchFor(base, suffix, depth) {
 }
 
 /**
+ * Extract click targets from the rendered DOM.
+ *
+ * DSPs embed click URLs inside `<a href="...">` tags in the creative
+ * markup. After rendering, querying `document.querySelectorAll('a[href]')`
+ * captures every clickable element regardless of URL pattern
+ * (`/t/click?e=`, `/click/`, `/ad/ck/`, `${CLICK_URL:URLENCODE}`, etc.).
+ *
+ * @param {import('playwright').Page} page
+ * @returns {Promise<string[]>}
+ */
+async function extractClickUrlsFromDom(page) {
+  return await page.evaluate(() => {
+    const elements = document.querySelectorAll('a[href]');
+    const urls = [];
+
+    for (const el of elements) {
+      const href = el.getAttribute('href');
+
+      if (href) {
+        // Resolve relative URLs against the page location
+        try {
+          urls.push(new URL(href, window.location.href).href);
+        } catch {
+          urls.push(href);
+        }
+      }
+    }
+
+    return urls;
+  });
+}
+
+/**
  * A reusable headless browser that fires pixels through a proxy.
  */
 export class PixelShooter {
@@ -168,12 +201,18 @@ export class PixelShooter {
   }
 
   /**
-   * Fire the pixel(s) in a creative through a proxied context.
+   * Fire the pixel(s) and/or click URL through a proxied Chromium context.
+   *
+   * The same browser context is reused for both pixel and click, ensuring
+   * identical proxy IP, UA, TLS fingerprint, and HTTP/2 session — exactly
+   * what the exchange's inspectClick expects.
    *
    * @param {object} options
    * @param {string} options.adm          creative markup from bid.adm
    * @param {string} options.ua           device user agent to present
    * @param {string} [options.pixelUrl]   fallback if adm has no markup
+   * @param {string} [options.clickUrl]   click tracker URL (legacy: fires alone)
+   * @param {string[]} [options.clickUrls] Click URLs extracted from rendered DOM.
    * @param {object} options.proxy        Proxy config. Prefer a LOCAL BRIDGE
    *                                       url (see proxy-bridge.mjs): Chromium
    *                                       is unreliable with an authenticating
@@ -182,12 +221,14 @@ export class PixelShooter {
    * @param {object} [options.device]     { width, height, pixelRatio, mobile }
    * @param {string} [options.language]
    * @param {number} [options.timeoutMs]
-   * @returns {Promise<{ok: boolean, status?: number, requests: object[], error?: string}>}
+   * @returns {Promise<{ok: boolean, status?: number, requests: object[], error?: string, clickOk?: boolean, clickRequests?: object[]}>}
    */
   async firePixel({
     adm,
     ua,
     pixelUrl,
+    clickUrl,
+    clickUrls,
     proxy,
     device = { width: 360, height: 640, pixelRatio: 3, mobile: true },
     language = 'en-US',
@@ -347,13 +388,127 @@ export class PixelShooter {
 
       const pixelHits = captured.filter((c) => /\/t\/imp|pixel|impression|\/imp\?/i.test(c.url));
 
-      return {
+      /*
+       * Extract click targets from the rendered DOM.
+       *
+       * DSPs embed click URLs inside `<a href="...">` tags in the creative
+       * markup. After rendering, querying `document.querySelectorAll('a[href]')`
+       * captures every clickable element regardless of URL pattern
+       * (`/t/click?e=`, `/click/`, `/ad/ck/`, `${CLICK_URL:URLENCODE}`, etc.).
+       */
+      const clickUrlsFromDom = await extractClickUrlsFromDom(page);
+
+      /*
+       * Fire click URLs through the same Chromium context if any were
+       * provided.  This reuses the same proxy, UA, and TLS fingerprint as
+       * the impression, which is what the exchange's inspectClick expects.
+       */
+      let clickResult = null;
+
+      const clickTargets = [
+        ...clickUrlsFromDom,
+        ...(clickUrl ? [clickUrl] : []),
+      ];
+
+      if (clickTargets.length > 0) {
+        const uniqueUrls = [...new Set(clickTargets)];
+
+        for (const url of uniqueUrls) {
+          const clickCaptured = [];
+
+          /*
+           * Attach a second CDP session to capture the click navigation
+           * headers independently.
+           */
+          const clickCdp = await context.newCDPSession(page);
+
+          await clickCdp.send('Network.enable');
+          await clickCdp.send('Fetch.enable', {
+            patterns: [{ urlPattern: '*', requestStage: 'Request' }],
+          });
+
+          const clickWireHeaders = new Map();
+
+          clickCdp.on('Network.requestWillBeSentExtraInfo', (event) => {
+            clickWireHeaders.set(event.requestId, event.headers);
+          });
+
+          clickCdp.on('Fetch.requestPaused', (event) => {
+            const req = event.request;
+
+            const recorded = {
+              url: req.url,
+              method: req.method,
+              resourceType: event.resourceType,
+              headers: clickWireHeaders.get(event.requestId) ?? req.headers,
+            };
+            clickCaptured.push(recorded);
+
+            const major = parseChromeMajor(ua);
+            const isWv = /;\s*wv\)/.test(String(ua));
+
+            if (major) {
+              const overrides = [
+                { name: 'sec-ch-ua', value: buildBrandList(major, { webview: isWv }) },
+                { name: 'sec-ch-ua-mobile', value: '?1' },
+                { name: 'sec-ch-ua-platform', value: '"Android"' },
+              ];
+
+              clickCdp.send('Fetch.continueRequest', {
+                requestId: event.requestId,
+                headers: [
+                  ...Object.entries(req.headers).map(([name, value]) => ({ name, value: String(value) })),
+                  ...overrides,
+                ],
+              }).catch(() => {
+                clickCdp.send('Fetch.continueRequest', { requestId: event.requestId }).catch(() => {});
+              });
+
+              recorded.hintsRewritten = overrides.map((o) => `${o.name}=${o.value}`);
+              return;
+            }
+          });
+
+          clickCdp.on('Network.responseReceived', (event) => {
+            const entry = clickCaptured.find((c) => c.url === event.response.url && c.status === undefined);
+            if (entry) entry.status = event.response.status;
+          });
+
+          page.on('response', (res) => {
+            const entry = clickCaptured.find((c) => c.url === res.url() && c.status === undefined);
+            if (entry) entry.status = res.status();
+          });
+
+          page.on('requestfailed', (req) => {
+            const entry = clickCaptured.find((c) => c.url === req.url() && c.status === undefined && !c.failure);
+            if (entry) entry.failure = req.failure()?.errorText ?? 'failed';
+          });
+
+          await page.goto(url, { waitUntil: 'load', timeout: timeoutMs }).catch(() => {});
+          await page.waitForTimeout(500);
+        }
+
+        clickResult = {
+          ok: true,
+          requests: clickCaptured,
+          clickHits: clickCaptured,
+        };
+      }
+
+      const result = {
         ok: pixelHits.length > 0 && pixelHits.some((h) => (h.status ?? 0) >= 200 && (h.status ?? 0) < 400),
         status: pixelHits.find((h) => h.status)?.status,
         requests: captured,
         pixelHits,
         tlsInfo,
+        ...(clickResult ? { clickOk: clickResult.ok, clickRequests: clickResult.requests, clickHits: clickResult.clickHits } : {}),
       };
+
+      if (clickResult) {
+        result.clickResult = clickResult;
+      }
+
+      return result;
     } catch (error) {
       return { ok: false, error: String(error?.message ?? error), requests: captured };
     } finally {

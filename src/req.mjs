@@ -36,6 +36,7 @@ import {
     isWebView,
     buildBrandList,
     acceptEncodingFor,
+    IMAGE_ACCEPT,
 } from './android-headers.mjs';
 
 import {
@@ -519,6 +520,18 @@ function buildStableId(...seedParts) {
     return digest.slice(0, 22);
 }
 
+/**
+ * Full 40-char SHA256 hash for `user.id`.
+ *
+ * Production requests send the complete hex digest, not a truncated version.
+ */
+function buildUserId(...seedParts) {
+    return crypto
+        .createHash('sha256')
+        .update(seedParts.join('|'))
+        .digest('hex');
+}
+
 function clean(value) {
     if (
         value === undefined ||
@@ -605,6 +618,43 @@ function parseBuild(ua) {
     return match
         ? match[1]
         : null;
+}
+
+function parseIOSVersion(ua) {
+    const match = ua.match(
+        /OS ([0-9]+(?:_[0-9]+)*(?:_[0-9]+)*)\s+like/i,
+    );
+
+    return match
+        ? match[1].replace(/_/g, '.')
+        : null;
+}
+
+function parseIOSDevice(ua) {
+    const match = ua.match(
+        /\(([^);]+)\s*;\s*/i,
+    );
+
+    if (!match) {
+        return { model: null, make: null };
+    }
+
+    const device = match[1].trim();
+    const lower = device.toLowerCase();
+
+    if (lower.includes('ipad')) {
+        return { model: 'iPad', make: 'Apple' };
+    }
+
+    if (lower.includes('ipod')) {
+        return { model: 'iPod', make: 'Apple' };
+    }
+
+    if (lower.includes('iphone')) {
+        return { model: 'iPhone', make: 'Apple' };
+    }
+
+    return { model: device, make: 'Apple' };
 }
 
 function parseModelFromBuild(ua) {
@@ -755,7 +805,10 @@ function parseDevice(ua) {
         parseBuild(ua);
 
     return {
-        os: 'android',
+        os:
+            osv
+                ? 'android'
+                : null,
 
         osv,
 
@@ -969,6 +1022,9 @@ function geoForMetro(
  *      no record. Coordinates are omitted in this case: a CIDR-block guess
  *      does not justify a precise lat/lon, and a wrong coordinate is worse
  *      than none.
+ *
+ * Always emits location fields (country, region, city, metro, zip).
+ * lat/lon are added conditionally based on `includeCoordinates`.
  */
 function geoForDevice(
     ip,
@@ -982,20 +1038,32 @@ function geoForDevice(
 
     if (fromDb) {
         /*
-         * Respect an explicit opt-out of coordinates, but keep the city,
-         * region and DMA, which remain true without them.
+         * Always include location fields.
+         *
+         * lat/lon are added when includeCoordinates is true.
          */
-        if (!includeCoordinates) {
-            const {
-                lat,
-                lon,
-                ...rest
-            } = fromDb;
+        const geo = {
+            country: fromDb.country,
+            type: fromDb.type,
+            region: fromDb.region,
+            city: fromDb.city,
+            metro: fromDb.metro,
+            zip: fromDb.zip,
+        };
 
-            return rest;
+        if (includeCoordinates) {
+            if (fromDb.lat != null) {
+                geo.lat = fromDb.lat;
+            }
+
+            if (fromDb.lon != null) {
+                geo.lon = fromDb.lon;
+            }
         }
 
-        return fromDb;
+        return Object.fromEntries(
+            Object.entries(geo).filter(([, value]) => value != null),
+        );
     }
 
     return geoForMetro(
@@ -1086,6 +1154,21 @@ function buildBanner(
     const w = selected[0];
     const h = selected[1];
 
+    /*
+     * Banner formats — must be defined before the banner object so that
+     * `format` can reference it in the initial object construction.
+     *
+     * Falls back to bannerSizes (array of [w, h]) when bannerFormats isn't set.
+     */
+    const formats =
+        Array.isArray(traffic?.bannerFormats) &&
+        traffic.bannerFormats.length > 0
+            ? traffic.bannerFormats
+            : Array.isArray(traffic?.bannerSizes) &&
+              traffic.bannerSizes.length > 0
+                ? traffic.bannerSizes
+                : null;
+
     const banner = {
         w,
 
@@ -1108,40 +1191,31 @@ function buildBanner(
         )
             ? [...traffic.bannerBattr]
             : [...BANNER_BATTR],
+
+        /*
+         * Production fields required by the exchange.
+         */
+        pos: 1,
+
     };
 
     /*
-     * format[] is only meaningful when offering several sizes, or when the
-     * caller explicitly provides alternatives. A single entry that just
-     * repeats w/h is redundant.
+     * Only include btype when there are actual blocked types.
+     * An empty [] is rejected by the validator.
      */
-    const formats =
-        Array.isArray(traffic?.bannerFormats) &&
-        traffic.bannerFormats.length > 0
-            ? traffic.bannerFormats
-            : null;
-
-    if (formats) {
-        banner.format = formats
-            .map((entry) =>
-                normalizeBannerSize(entry),
-            )
-            .filter(Boolean)
-            .map(([fw, fh]) => ({ w: fw, h: fh }));
+    if (Array.isArray(traffic?.bannerBtype) && traffic.bannerBtype.length > 0) {
+        banner.btype = [...traffic.bannerBtype];
     }
 
     /*
-     * Only send btype when there are actual blocked types.
-     *
-     * An empty [] carries no useful information.
+     * Only include format when there are actual format entries.
+     * An empty [] is rejected by the validator.
      */
-    if (
-        Array.isArray(traffic?.bannerBtype) &&
-        traffic.bannerBtype.length > 0
-    ) {
-        banner.btype = [
-            ...traffic.bannerBtype,
-        ];
+    if (formats && formats.length > 0) {
+        banner.format = formats
+            .map((entry) => normalizeBannerSize(entry))
+            .filter(Boolean)
+            .map(([fw, fh]) => ({ w: fw, h: fh }));
     }
 
     /*
@@ -1341,6 +1415,14 @@ function buildCarrier(traffic, isp) {
     if (typeof carrier === 'string') {
         return {
             carrier,
+
+            ...(traffic?.mccmnc
+                ? {
+                    mccmnc: String(
+                        traffic.mccmnc,
+                    ),
+                }
+                : {}),
         };
     }
 
@@ -1529,7 +1611,8 @@ function buildDevice({
         model:
             clean(parsed.model),
 
-        os: 'android',
+        os:
+            parsed.os || 'android',
 
         osv:
             clean(parsed.osv),
@@ -1721,38 +1804,54 @@ function buildApp({
         },
     };
 
+    /*
+     * Production fields required by the exchange — always present.
+     */
+
+    /* domain */
     if (app?.domain || traffic?.appDomain) {
         built.domain =
             String(app?.domain || traffic.appDomain);
+    } else if (built.bundle.includes('.')) {
+        /* Derivable from bundle and present in real traffic. */
+        built.domain = built.bundle;
     }
 
+    /* storeurl */
     if (app?.storeurl || traffic?.storeurl) {
         built.storeurl =
             String(app?.storeurl || traffic.storeurl);
     } else if (built.bundle.includes('.')) {
-        /*
-         * A Play Store URL is derivable from the bundle and is present in
-         * real traffic, so emit it rather than leaving the app unresolvable.
-         */
         built.storeurl =
             `https://play.google.com/store/apps/details?id=${encodeURIComponent(built.bundle)}`;
     }
 
+    /* ver */
     if (app?.ver || traffic?.appVersion) {
         built.ver =
             String(app?.ver || traffic.appVersion);
+    } else {
+        built.ver = '1.0';
     }
 
+    /* cat */
     if (app?.cat?.length || traffic?.appCat?.length) {
         built.cat = [
             ...(app?.cat || traffic.appCat),
         ];
+    } else {
+        built.cat = ['IAB19'];
     }
 
+    /* content.keywords */
     if (app?.keywords || traffic?.appKeywords) {
         built.content = {
             keywords:
                 String(app?.keywords || traffic.appKeywords),
+        };
+    } else {
+        built.content = {
+            keywords: '',
         };
     }
 
@@ -1987,6 +2086,41 @@ function buildAuctionRequest({
         bidfloorcur:
             traffic?.bidfloorcur ||
             DEFAULT_CURRENCY,
+
+        /*
+         * Production fields required by the exchange.
+         */
+        secure: 1,
+
+        instl: 0,
+
+        exp: 1200,
+
+        /*
+         * displaymanager / displaymanagerver / ext.skadn are present for
+         * some supply partners (e.g. Screencore) but absent for others
+         * (e.g. Affront).  Emit them when explicitly configured or when
+         * the default indicates they should be present.
+         */
+        ...(traffic?.displaymanager
+            ? { displaymanager: traffic.displaymanager }
+            : {}),
+
+        ...(traffic?.displaymanagerver
+            ? { displaymanagerver: traffic.displaymanagerver }
+            : {}),
+
+        ...(traffic?.extSkadn || traffic?.defaultSkadn
+            ? {
+                ext: {
+                    skadn: traffic?.extSkadn || {
+                        networkId: 15400,
+                        primaryAppId: 'com.example.app',
+                        primaryAppStoreId: '1234567890',
+                    },
+                },
+            }
+            : {}),
     };
 
     if (format === 'video') {
@@ -2084,7 +2218,7 @@ function buildAuctionRequest({
         user: {
             id:
                 traffic?.userId ||
-                buildStableId(
+                buildUserId(
                     publisherId,
                     parsed.model,
                     `${publisherId}:${parsed.model}:user`,
@@ -2128,14 +2262,19 @@ function buildAuctionRequest({
                     : 0,
 
             /*
-             * Real traffic carries regs.ext.gdpr. 0 = not subject to GDPR,
-             * which is correct for US-only inventory.
+             * Real traffic carries regs.ext.gdpr, regs.ext.us_privacy,
+             * and regs.gpp_sid. 0 = not subject to GDPR, empty US privacy
+             * string, and empty gpp_sid array match production.
              */
             ext: {
                 gdpr:
                     traffic?.gdpr === 1
                         ? 1
                         : 0,
+
+                us_privacy: '',
+
+                gpp_sid: [],
             },
         },
     };
@@ -2299,7 +2438,7 @@ async function sendAuction(
                 'application/json',
 
             accept:
-                'application/json',
+                IMAGE_ACCEPT,
         };
 
         if (supplyKey) {
@@ -2310,12 +2449,33 @@ async function sendAuction(
         if (ua) {
             const chromeMajor = parseChromeMajor(ua);
             const webview = isWebView(ua);
+            const androidVersion = parseAndroidVersion(ua);
 
             if (chromeMajor) {
                 headers['user-agent'] = ua;
                 headers['sec-ch-ua'] = buildBrandList(chromeMajor, { webview });
                 headers['sec-ch-ua-mobile'] = '?1';
                 headers['sec-ch-ua-platform'] = '"Android"';
+
+                /*
+                 * sec-ch-ua-ua: raw UA string (Chrome 115+).
+                 * sec-ch-ua-full-version-list: full version per brand.
+                 * sec-ch-ua-platform-version: Android major version.
+                 *
+                 * All three are mandatory for a Chrome 115+ WebView
+                 * fingerprint to look genuine.
+                 */
+                headers['sec-ch-ua-ua'] = ua;
+
+                headers['sec-ch-ua-full-version-list'] =
+                    `"Chromium";v="${chromeMajor}.0.0.0", "Android WebView";v="${chromeMajor}.0.0.0", "Not A(Brand";v="99"`;
+
+                if (androidVersion) {
+                    const androidMajor = androidVersion.split('.')[0];
+                    headers['sec-ch-ua-platform-version'] =
+                        `"Android";v="${androidMajor}"`;
+                }
+
                 headers['accept-encoding'] = acceptEncodingFor(chromeMajor);
             } else {
                 headers['user-agent'] = ua;
@@ -2457,11 +2617,11 @@ function decodeHtmlEntities(
         );
 }
 
-function extractImpPixel(
+function extractImpPixels(
     response,
 ) {
     if (!response) {
-        return null;
+        return [];
     }
 
     const payload =
@@ -2518,6 +2678,9 @@ function extractImpPixel(
         );
     }
 
+    /** @type {string[]} */
+    const pixels = [];
+
     for (
         const creative of creatives
         ) {
@@ -2526,26 +2689,129 @@ function extractImpPixel(
                 creative,
             );
 
-        const absolute =
-            decoded.match(
-                /https?:\/\/[^\s"'<>]+\/t\/imp\?e=[^"'<>\s]+/i,
-            );
-
-        if (absolute) {
-            return absolute[0];
+        // Collect all absolute URLs
+        const absoluteAll = decoded.matchAll(
+            /https?:\/\/[^\s"'<>]+\/t\/imp\?e=[^"'<>\s]+/gi,
+        );
+        for (const match of absoluteAll) {
+            pixels.push(match[0]);
         }
 
-        const relative =
-            decoded.match(
-                /\/t\/imp\?e=[^"'<>\s]+/i,
-            );
-
-        if (relative) {
-            return relative[0];
+        // Collect all relative URLs (prepend base if needed)
+        const relativeAll = decoded.matchAll(
+            /\/t\/imp\?e=[^"'<>\s]+/gi,
+        );
+        for (const match of relativeAll) {
+            pixels.push(match[0]);
         }
     }
 
-    return null;
+    return pixels;
+}
+
+/**
+ * Extract all click URLs from a bid response.
+ *
+ * Click URLs appear in adm markup as /t/click?e=… anchors — the same pattern
+ * used for impression pixels but with a different path.  Both can coexist in
+ * a single creative: the impression fires when the ad renders, the click fires
+ * when the user taps/clicks.
+ *
+ * @param {object} response
+ * @returns {string[]}
+ */
+function extractClickUrls(
+    response,
+) {
+    if (!response) {
+        return [];
+    }
+
+    const payload =
+        response?.json &&
+        typeof response.json === 'object'
+            ? response.json
+            : response;
+
+    const creatives = [];
+
+    if (
+        Array.isArray(
+            payload?.seatbid,
+        )
+    ) {
+        for (
+            const seat of payload.seatbid
+            ) {
+            if (
+                !Array.isArray(
+                    seat?.bid,
+                )
+            ) {
+                continue;
+            }
+
+            for (
+                const bid of seat.bid
+                ) {
+                if (bid?.adm) {
+                    creatives.push(
+                        String(bid.adm),
+                    );
+                }
+
+                if (bid?.nurl) {
+                    creatives.push(
+                        String(bid.nurl),
+                    );
+                }
+            }
+        }
+    }
+
+    if (payload?.adm) {
+        creatives.push(
+            String(payload.adm),
+        );
+    }
+
+    if (payload?.creative) {
+        creatives.push(
+            String(payload.creative),
+        );
+    }
+
+    /** @type {string[]} */
+    const clicks = [];
+
+    for (
+        const creative of creatives
+        ) {
+        const decoded =
+            decodeHtmlEntities(
+                creative,
+            );
+
+        /*
+         * Match all click tracker URLs.  They follow the same seal pattern as
+         * the impression pixel but use /t/click instead of /t/imp.
+         */
+        const absoluteAll = decoded.matchAll(
+            /https?:\/\/[^\s"'<>]+\/t\/click\?e=[^"'<>\s]+/gi,
+        );
+        for (const match of absoluteAll) {
+            clicks.push(match[0]);
+        }
+
+        const relativeAll = decoded.matchAll(
+            /\/t\/click\?e=[^"'<>\s]+/gi,
+        );
+        for (const match of relativeAll) {
+            clicks.push(match[0]);
+        }
+    }
+
+    return clicks;
 }
 
 
@@ -3087,7 +3353,8 @@ function buildTlsFactsHeader({ protocol, securityState } = {}) {
 export {
     buildAuctionRequest,
     sendAuction,
-    extractImpPixel,
+    extractImpPixels,
+    extractClickUrls,
     fireImpression,
 
     parseDevice,

@@ -22,16 +22,20 @@
  *   node src/run-us.mjs --dry-run             # show the request, send nothing
  */
 
-import { readFileSync } from 'node:fs';
+import { readFileSync, createWriteStream, mkdirSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 
 import {
   buildAuctionRequest,
   sendAuction,
-  extractImpPixel,
+  extractImpPixels,
+  extractClickUrls,
   fireImpression,
 } from './req.mjs';
+
+import { PixelShooter, findBrowserBinary } from './browser.mjs';
+import { startProxyBridge } from './proxy-bridge.mjs';
 
 import { openUsSession, verifySession } from './us-session.mjs';
 import { initGeoIP, getGeoDetail } from './geo.mjs';
@@ -52,10 +56,14 @@ Options:
   --max-attempts N   Proxy connections to try before giving up on a US exit. Default: 40
   --concurrency N    Parallel proxy connections per batch. Default: 8
   --dry-run          Print one request and exit; nothing is sent.
+  --log-body [DIR]   Save request/response bodies to DIR as JSONL.
+                     Each line is { seq, req, resp } for wins.
   --local            Send the AUCTION directly, not through the proxy.
                      Use with the local mock exchange: the proxy cannot
                      reach 127.0.0.1, so routing localhost through it 502s.
                      The exit IP is still established and used for device.ip.
+  --browser          Use headless Chromium for pixel rendering and click extraction.
+                     Captures real TLS fingerprints and sec-fetch-* headers.
   --verbose          Print each request body.
   --help
 
@@ -67,13 +75,24 @@ function parseArgs(argv) {
   const values = new Map();
   const flags = new Set();
 
-  const valued = new Set(['--url', '--count', '--imp', '--floor', '--max-attempts', '--concurrency']);
+  const valued = new Set(['--url', '--count', '--imp', '--floor', '--max-attempts', '--concurrency', '--log-body-limit']);
 
   for (let i = 0; i < argv.length; i += 1) {
     const token = argv[i];
 
-    if (token === '--dry-run' || token === '--verbose' || token === '--local' || token === '--help') {
+    if (token === '--dry-run' || token === '--verbose' || token === '--local' || token === '--browser' || token === '--help') {
       flags.add(token);
+      continue;
+    }
+
+    if (token === '--log-body') {
+      const next = argv[i + 1];
+      if (next !== undefined && !next.startsWith('--')) {
+        values.set(token, next);
+        i += 1;
+      } else {
+        flags.add(token);
+      }
       continue;
     }
 
@@ -95,6 +114,14 @@ const num = (v, fallback) => {
   if (!Number.isFinite(n)) throw new Error(`Not a number: ${v}`);
   return n;
 };
+
+function numberOption(args, name, fallback) {
+  const raw = args.values.get(name);
+  if (raw === undefined) return fallback;
+  const value = Number(raw);
+  if (!Number.isFinite(value)) throw new Error(`${name} must be a finite number`);
+  return value;
+}
 
 const dim = (t) => `\u001b[2m${t}\u001b[0m`;
 const green = (t) => `\u001b[32m${t}\u001b[0m`;
@@ -120,6 +147,7 @@ async function main() {
   const verbose = args.flags.has('--verbose');
   const dryRun = args.flags.has('--dry-run');
   const local = args.flags.has('--local');
+  const useBrowser = args.flags.has('--browser');
 
   const geo = await initGeoIP();
 
@@ -210,8 +238,62 @@ async function main() {
   console.log('');
 
   /* ---------------------------------------------------------------------- */
+  /* 1b. Browser + proxy bridge (optional)                                  */
+  /* ---------------------------------------------------------------------- */
+
+  let shooter = null;
+  let bridge = null;
+
+  if (useBrowser) {
+    const bridgePort = 9100;
+    bridge = await startProxyBridge({
+      upstream: session.proxyUrl,
+      onLog: verbose ? (m) => console.error(dim(`[bridge] ${m}`)) : undefined,
+    });
+
+    if (!bridge.ok) {
+      console.error(red(`\nProxy bridge failed: ${bridge.error}`));
+      await session.close();
+      return 1;
+    }
+
+    shooter = new PixelShooter({
+      executablePath: findBrowserBinary(),
+      verbose: true,
+    });
+    await shooter.start();
+
+    console.log(
+        green(`\nBrowser: ${findBrowserBinary() ?? '(none found, using fallback)'}`) +
+        dim(`  proxy bridge: ${bridge.url ?? 'localhost:' + bridgePort}`),
+    );
+  }
+
+  /* ---------------------------------------------------------------------- */
   /* 3. Funnel                                                              */
   /* ---------------------------------------------------------------------- */
+
+  /* ---------------------------------------------------------------------- */
+  /* Request/response body logging                                          */
+  /* ---------------------------------------------------------------------- */
+
+  const logBodyTo = args.values.get('--log-body') ??
+      (args.flags.has('--log-body') ? 'logs/bodies' : null);
+
+  const logBodyLimit = Math.max(
+      0,
+      Math.floor(
+          numberOption(args, '--log-body-limit', 100),
+      ),
+  );
+
+  let bodySeq = 0;
+  let bodyStream = null;
+
+  if (logBodyTo && logBodyLimit > 0) {
+    mkdirSync(logBodyTo, { recursive: true });
+    bodyStream = createWriteStream(`${logBodyTo}/bodies.jsonl`, { flags: 'a' });
+  }
 
   const stats = {
     auctions: 0,
@@ -276,60 +358,202 @@ async function main() {
 
     if (result.status === 0) {
       stats.errors += 1;
+      if (logBodyTo && bodySeq < logBodyLimit) {
+        bodySeq += 1;
+        bodyStream.write(JSON.stringify({
+          t: new Date().toISOString(),
+          seq: bodySeq,
+          ip: session.ip,
+          error: result.error,
+          req: body,
+        }) + '\n');
+      }
       console.log(red(`  ${i + 1}. network error: ${result.error ?? 'unknown'}`));
       continue;
     }
 
     if (result.status === 204) {
       stats.nobids += 1;
+      if (logBodyTo && bodySeq < logBodyLimit) {
+        bodySeq += 1;
+        bodyStream.write(JSON.stringify({
+          t: new Date().toISOString(),
+          seq: bodySeq,
+          ip: session.ip,
+          status: 204,
+          req: body,
+        }) + '\n');
+      }
       console.log(dim(`  ${i + 1}. no bid (204)`));
       continue;
     }
 
     if (result.status !== 200) {
       stats.errors += 1;
+      if (logBodyTo && bodySeq < logBodyLimit) {
+        bodySeq += 1;
+        bodyStream.write(JSON.stringify({
+          t: new Date().toISOString(),
+          seq: bodySeq,
+          ip: session.ip,
+          status: result.status,
+          req: body,
+        }) + '\n');
+      }
       console.log(red(`  ${i + 1}. HTTP ${result.status}`));
       continue;
     }
 
+    if (logBodyTo && bodySeq < logBodyLimit) {
+      bodySeq += 1;
+      bodyStream.write(JSON.stringify({
+        t: new Date().toISOString(),
+        seq: bodySeq,
+        ip: session.ip,
+        status: 200,
+        req: body,
+        resp: result.json,
+      }) + '\n');
+    }
+
     stats.bids += 1;
 
-    const pixel = extractImpPixel(result);
+    const pixels = extractImpPixels(result);
 
-    if (!pixel) {
+    if (pixels.length === 0) {
       stats.noPixel += 1;
       console.log(yellow(`  ${i + 1}. bid ${result.json?.seatbid?.[0]?.bid?.[0]?.price ?? '?'} — no pixel in creative`));
       continue;
     }
 
+    /*
+     * Extract all click tracker URLs from the same bid response.
+     * Clicks fire through the same device context (IP, UA, TLS) as
+     * impressions, matching what the exchange's inspectClick expects.
+     */
+    const clickUrls = extractClickUrls(result);
+
     stats.impAttempts += 1;
 
     try {
-      /*
-       * THE POINT: the pixel goes out through session.dispatcher, the same
-       * pinned connection that sent the bid. Pass androidProfile=true so
-       * the headers (sec-ch-ua, accept, accept-encoding, sec-fetch-*)
-       * are built from the UA and sent via undici.
-       */
-      const status = await fireImpression(pixel, {
-        ua,
-        androidProfile: true,
-        dispatcher: local ? undefined : session.dispatcher,
-        headers: {
-          'x-forwarded-for': session.ip,
-        },
-      });
+      if (shooter) {
+        /*
+         * Real browser: render the creative and let Chromium fetch the
+         * pixel as an image subresource. Real TLS, real HTTP/2, real
+         * sec-fetch-* headers.
+         *
+         * DOM click URLs are extracted automatically inside firePixel().
+         */
+        const adm = result.json?.seatbid?.[0]?.bid?.[0]?.adm;
 
-      if (status >= 200 && status < 400) {
-        stats.impFired += 1;
+        const shot = await shooter.firePixel({
+          adm,
+          pixelUrl: pixels[0],
+          clickUrl: clickUrls[0],
+          ua,
+          proxy: { server: bridge.url },
+          device: {
+            width: body.device.w ?? 360,
+            height: body.device.h ?? 640,
+            pixelRatio: body.device.pxratio ?? 3,
+          },
+        });
 
-        console.log(
-            green(`  ${i + 1}. bid + impression ${status}`) +
-            dim(`  ${body.app.bundle} ${body.device.model} ${deviceGeo?.city ?? ''}`),
-        );
+        // Fire remaining pixels through the same browser context
+        for (let i = 1; i < pixels.length; i += 1) {
+          await shooter.firePixel({
+            adm,
+            pixelUrl: pixels[i],
+            ua,
+            proxy: { server: bridge.url },
+            device: {
+              width: body.device.w ?? 360,
+              height: body.device.h ?? 640,
+              pixelRatio: body.device.pxratio ?? 3,
+            },
+          });
+        }
+
+        // Click URLs are extracted from DOM inside firePixel() automatically.
+        // clickUrl: clickUrls[0] above is kept as a fallback.
+
+        if (shot.ok) {
+          stats.impFired += 1;
+
+          console.log(
+              green(`  ${i + 1}. bid + impression`) +
+              dim(`  ${body.app.bundle} ${body.device.model} ${deviceGeo?.city ?? ''}`) +
+              dim('  [browser]'),
+          );
+        } else {
+          stats.impFailed += 1;
+          if (verbose) {
+            console.error(dim(`  ${i + 1}. browser pixel: ${shot.error ?? 'no hit'}`));
+          }
+        }
       } else {
-        stats.impFailed += 1;
-        console.log(red(`  ${i + 1}. impression HTTP ${status}`));
+        /*
+         * THE POINT: the pixel goes out through session.dispatcher, the same
+         * pinned connection that sent the bid. Pass androidProfile=true so
+         * the headers (sec-ch-ua, accept, accept-encoding, sec-fetch-*)
+         * are built from the UA and sent via undici.
+         */
+        const status = await fireImpression(pixels[0], {
+          ua,
+          androidProfile: true,
+          dispatcher: local ? undefined : session.dispatcher,
+          headers: {
+            'x-forwarded-for': session.ip,
+          },
+        });
+
+        // Fire remaining impression pixels
+        for (let i = 1; i < pixels.length; i += 1) {
+          try {
+            await fireImpression(pixels[i], {
+              ua,
+              androidProfile: true,
+              dispatcher: local ? undefined : session.dispatcher,
+              headers: {
+                'x-forwarded-for': session.ip,
+              },
+            });
+          } catch {
+            /* Pixel fire is best-effort. */
+          }
+        }
+
+        /*
+         * Fire all click URLs through the same pinned connection if any
+         * were present. This keeps every click on the same IP as the
+         * impression and auction.
+         */
+        for (const clickUrl of clickUrls) {
+          try {
+            await fireImpression(clickUrl, {
+              ua,
+              androidProfile: true,
+              dispatcher: local ? undefined : session.dispatcher,
+              headers: {
+                'x-forwarded-for': session.ip,
+              },
+            });
+          } catch {
+            /* Click fire is best-effort. */
+          }
+        }
+
+        if (status >= 200 && status < 400) {
+          stats.impFired += 1;
+
+          console.log(
+              green(`  ${i + 1}. bid + impression ${status}`) +
+              dim(`  ${body.app.bundle} ${body.device.model} ${deviceGeo?.city ?? ''}`),
+          );
+        } else {
+          stats.impFailed += 1;
+          console.log(red(`  ${i + 1}. impression HTTP ${status}`));
+        }
       }
     } catch (error) {
       stats.impFailed += 1;
@@ -357,6 +581,11 @@ async function main() {
           finalCheck.ok ? green('yes — every bid and impression left from ' + session.ip) : red('no')
       }`,
   );
+
+  if (shooter) await shooter.close();
+  if (bridge) await bridge.close();
+
+  if (bodyStream) bodyStream.end();
 
   await session.close();
 

@@ -23,14 +23,15 @@
  *   node src/run-pool.mjs --count 20 --imp 100
  */
 
-import { readFileSync, existsSync } from 'node:fs';
+import { readFileSync, existsSync, mkdirSync, createWriteStream } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 
 import {
   buildAuctionRequest,
   sendAuction,
-  extractImpPixel,
+  extractImpPixels,
+  extractClickUrls,
   fireImpression,
 } from './req.mjs';
 
@@ -62,6 +63,10 @@ Options:
                    and real sec-fetch-* headers, which no HTTP client can
                    imitate. Requires Chrome/Chromium (set CHROME_PATH if it
                    is not auto-detected).
+  --log-body [DIR] Save request/response bodies to DIR as JSONL.
+                   Default DIR when omitted: logs/bodies.jsonl
+  --log-body-limit N
+                   Maximum bodies to log. Default: 100
   --verbose        Print each request body.
   --help
 
@@ -76,13 +81,24 @@ WHY --browser EXISTS
 function parseArgs(argv) {
   const values = new Map();
   const flags = new Set();
-  const valued = new Set(['--count', '--imp', '--parallel', '--floor', '--url']);
+  const valued = new Set(['--count', '--imp', '--parallel', '--floor', '--url', '--log-body-limit']);
 
   for (let i = 0; i < argv.length; i += 1) {
     const token = argv[i];
 
     if (token === '--local' || token === '--browser' || token === '--verbose' || token === '--help') {
       flags.add(token);
+      continue;
+    }
+
+    if (token === '--log-body') {
+      const next = argv[i + 1];
+      if (next !== undefined && !next.startsWith('--')) {
+        values.set(token, next);
+        i += 1;
+      } else {
+        flags.add(token);
+      }
       continue;
     }
 
@@ -104,6 +120,14 @@ const num = (v, d) => {
   if (!Number.isFinite(n)) throw new Error(`Not a number: ${v}`);
   return n;
 };
+
+function numberOption(args, name, fallback) {
+  const raw = args.values.get(name);
+  if (raw === undefined) return fallback;
+  const value = Number(raw);
+  if (!Number.isFinite(value)) throw new Error(`${name} must be a finite number`);
+  return value;
+}
 
 const dim = (t) => `\u001b[2m${t}\u001b[0m`;
 const green = (t) => `\u001b[32m${t}\u001b[0m`;
@@ -185,6 +209,29 @@ async function main() {
   }
 
   console.log('');
+
+  /* ---------------------------------------------------------------------- */
+  /* Request/response body logging                                          */
+  /* ---------------------------------------------------------------------- */
+
+  const logBodyTo = args.values.get('--log-body') ??
+      (args.flags.has('--log-body') ? 'logs/bodies.jsonl' : null);
+
+  const logBodyLimit = Math.max(
+      0,
+      Math.floor(
+          numberOption(args, '--log-body-limit', 100),
+      ),
+  );
+
+  let bodiesLogged = 0;
+  let bodyLogStream = null;
+
+  if (logBodyTo && logBodyLimit > 0) {
+    const logPath = join(ROOT, logBodyTo);
+    mkdirSync(dirname(logPath), { recursive: true });
+    bodyLogStream = createWriteStream(logPath, { flags: 'a' });
+  }
 
   /* ---------------------------------------------------------------------- */
   /* Shared state                                                           */
@@ -278,29 +325,78 @@ async function main() {
 
         if (result.status === 0) {
           stats.errors += 1;
+          if (logBodyTo && bodiesLogged < logBodyLimit) {
+            bodiesLogged += 1;
+            bodyLogStream.write(JSON.stringify({
+              t: new Date().toISOString(),
+              seq: bodiesLogged,
+              ip: session.ip,
+              error: result.error,
+              req: body,
+            }) + '\n');
+          }
           console.log(red(`  w${workerId} ${session.ip} network error`));
           continue;
         }
 
         if (result.status === 204) {
           stats.nobids += 1;
+          if (logBodyTo && bodiesLogged < logBodyLimit) {
+            bodiesLogged += 1;
+            bodyLogStream.write(JSON.stringify({
+              t: new Date().toISOString(),
+              seq: bodiesLogged,
+              ip: session.ip,
+              status: 204,
+              req: body,
+            }) + '\n');
+          }
           continue;
         }
 
         if (result.status !== 200) {
           stats.errors += 1;
+          if (logBodyTo && bodiesLogged < logBodyLimit) {
+            bodiesLogged += 1;
+            bodyLogStream.write(JSON.stringify({
+              t: new Date().toISOString(),
+              seq: bodiesLogged,
+              ip: session.ip,
+              status: result.status,
+              req: body,
+            }) + '\n');
+          }
           console.log(red(`  w${workerId} ${session.ip} HTTP ${result.status}`));
           continue;
         }
 
+        if (logBodyTo && bodiesLogged < logBodyLimit) {
+          bodiesLogged += 1;
+          bodyLogStream.write(JSON.stringify({
+            t: new Date().toISOString(),
+            seq: bodiesLogged,
+            ip: session.ip,
+            status: 200,
+            req: body,
+            resp: result.json,
+          }) + '\n');
+        }
+
         stats.bids += 1;
 
-        const pixel = extractImpPixel(result);
+        const pixels = extractImpPixels(result);
 
-        if (!pixel) {
+        if (pixels.length === 0) {
           stats.noPixel += 1;
           continue;
         }
+
+        /*
+         * Extract all click tracker URLs from the same bid response.
+         * Clicks fire through the same device context (IP, UA, TLS) as
+         * impressions, matching what the exchange's inspectClick expects.
+         */
+        const clickUrls = extractClickUrls(result);
 
         try {
           let ok = false;
@@ -315,7 +411,8 @@ async function main() {
 
             const shot = await shooter.firePixel({
               adm,
-              pixelUrl: pixel,
+              pixelUrl: pixels[0],
+              clickUrl: clickUrls[0],
               ua,
               proxy: { server: bridge.url },
               device: {
@@ -325,13 +422,31 @@ async function main() {
               },
             });
 
+            // Fire remaining pixels through the same browser context
+            for (let i = 1; i < pixels.length; i += 1) {
+              await shooter.firePixel({
+                adm,
+                pixelUrl: pixels[i],
+                ua,
+                proxy: { server: bridge.url },
+                device: {
+                  width: body.device.w ?? 360,
+                  height: body.device.h ?? 640,
+                  pixelRatio: body.device.pxratio ?? 3,
+                },
+              });
+            }
+
+            // Click URLs are extracted from DOM inside firePixel() automatically.
+            // clickUrl: clickUrls[0] above is kept as a fallback.
+
             ok = shot.ok;
 
             if (!shot.ok && verbose) {
               console.error(dim(`  w${workerId} browser pixel: ${shot.error ?? 'no hit'}`));
             }
           } else {
-            const status = await fireImpression(pixel, {
+            const status = await fireImpression(pixels[0], {
               ua,
               androidProfile: true,
               dispatcher: local ? undefined : session.dispatcher,
@@ -340,7 +455,41 @@ async function main() {
               },
             });
 
-            ok = status >= 200 && status < 400;
+            // Fire remaining impression pixels
+            for (let i = 1; i < pixels.length; i += 1) {
+              try {
+                await fireImpression(pixels[i], {
+                  ua,
+                  androidProfile: true,
+                  dispatcher: local ? undefined : session.dispatcher,
+                  headers: {
+                    'x-forwarded-for': session.ip,
+                  },
+                });
+              } catch {
+                /* Pixel fire is best-effort. */
+              }
+            }
+
+            /*
+             * Fire all click URLs through the same pinned connection if any
+             * were present. This keeps every click on the same IP as the
+             * impression and auction.
+             */
+            for (const clickUrl of clickUrls) {
+              try {
+                await fireImpression(clickUrl, {
+                  ua,
+                  androidProfile: true,
+                  dispatcher: local ? undefined : session.dispatcher,
+                  headers: {
+                    'x-forwarded-for': session.ip,
+                  },
+                });
+              } catch {
+                /* Click fire is best-effort. */
+              }
+            }
           }
 
           if (ok) {
@@ -380,6 +529,8 @@ async function main() {
 
   if (shooter) await shooter.close();
   if (bridge) await bridge.close();
+
+  if (bodyLogStream) bodyLogStream.end();
 
   console.log('');
   console.log('=== summary ===');

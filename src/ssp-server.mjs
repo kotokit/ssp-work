@@ -44,11 +44,14 @@ import { APP_FIXTURES } from './traffic.mjs';
 import {
   buildAuctionRequest,
   sendAuction,
-  extractImpPixel,
+  extractImpPixels,
+  extractClickUrls,
   fireImpression,
   validateDevice,
   parseDevice,
 } from './req.mjs';
+import { PixelShooter, findBrowserBinary } from './browser.mjs';
+import { startProxyBridge } from './proxy-bridge.mjs';
 import {
   verifyProxy,
   proxyProblem as proxyProblemForStartup,
@@ -85,6 +88,7 @@ Options:
                           Default FILE when omitted: logs/bodies.jsonl
   --log-body-limit N      Maximum bodies to write. Default: 100
   --verbose               Log individual bid responses
+  --browser               Use headless Chromium for pixel rendering and DOM click extraction
   --quiet                 Disable periodic and startup logs
   --port N                Local control API port
   --help                  Show this help
@@ -102,6 +106,7 @@ function parseArgs(argv) {
   const booleanFlags = new Set([
     '--no-imp',
     '--verbose',
+    '--browser',
     '--quiet',
     '--help',
   ]);
@@ -282,7 +287,7 @@ function redactUrl(value) {
   }
 }
 
-function main() {
+async function main() {
   const args = parseArgs(process.argv.slice(2));
 
   if (args.flags.has('--help')) {
@@ -544,6 +549,39 @@ function main() {
     return sellers[sellers.length - 1];
   }
 
+  /* ------------------------------------------------------------------------ */
+  /* Browser + proxy bridge (optional)                                        */
+  /* ------------------------------------------------------------------------ */
+
+  const useBrowser = args.flags.has('--browser');
+  let shooter = null;
+  let bridge = null;
+
+  if (useBrowser) {
+    const bridgePort = 9100;
+    bridge = await startProxyBridge({
+      proxy: cfg.proxy?.url ?? null,
+      port: bridgePort,
+    });
+
+    if (!bridge.ok) {
+      console.error(`Proxy bridge failed: ${bridge.error}`);
+      process.exitCode = 1;
+      return;
+    }
+
+    shooter = new PixelShooter({
+      executablePath: findBrowserBinary(),
+      verbose: true,
+    });
+    await shooter.start();
+
+    console.log(
+        `Browser: ${findBrowserBinary() ?? '(none found, using fallback)'}  ` +
+        `proxy bridge: ${bridge.url ?? 'localhost:' + bridgePort}`,
+    );
+  }
+
   let urlKey = parsedAuctionUrl.searchParams.get('key') ?? '';
 
   const envKey =
@@ -696,7 +734,7 @@ function main() {
     };
   }
 
-  function finalize() {
+  async function finalize() {
     if (finalized || inFlight !== 0) return;
 
     finalized = true;
@@ -739,6 +777,10 @@ function main() {
       console.log('\n=== final ===');
       console.log(JSON.stringify(result, null, 2));
     }
+
+    // Close the browser shooter and proxy bridge.
+    if (shooter) await shooter.close();
+    if (bridge) await bridge.close();
 
     // Close the control listener once all outstanding attempts are drained.
     control.close(() => {
@@ -943,50 +985,147 @@ function main() {
       }
 
       if (auctionOutcome === 'bid' && fireImps) {
-        let pixel = null;
+        let pixels = [];
 
         try {
-          pixel = extractImpPixel(json);
+          pixels = extractImpPixels(json);
         } catch (err) {
           stats.lastError = `Impression URL extraction: ${String(err)}`;
         }
 
-        if (pixel) {
+        /*
+         * Extract all click tracker URLs from the same bid response.
+         * Clicks fire through the same device context (IP, UA, TLS) as
+         * impressions, matching what the exchange's inspectClick expects.
+         */
+        const clickUrls = extractClickUrls(json);
+
+        if (pixels.length > 0) {
           stats.impAttempts += 1;
 
           const impressionStarted = performance.now();
 
           try {
-            /*
-             * Fire from the same simulated device: same IP and same UA as
-             * the auction request, so the exchange can match the impression
-             * back to the bid it served. Pass androidProfile=true so the
-             * headers (sec-ch-ua, accept, accept-encoding, sec-fetch-*)
-             * are built from the UA and sent via undici (not fetch),
-             * which avoids fetch's sec-fetch-* rewriting.
-             *
-             * Pass tlsFacts={} so buildTlsFactsHeader() uses the default
-             * Chrome Android TLS fingerprint for the x-adx-tls header.
-             */
-            const impressionStatus = await fireImpression(pixel, {
-              ua,
-              androidProfile: true,
-              tlsFacts: {},
-              headers: {
-                'x-forwarded-for': ip,
-                'x-real-ip': ip,
-              },
-            });
+            if (shooter) {
+              /*
+               * Real browser: render the creative and let Chromium fetch the
+               * pixel as an image subresource. Real TLS, real HTTP/2, real
+               * sec-fetch-* headers.
+               *
+               * DOM click URLs are extracted automatically inside firePixel().
+               */
+              const adm = json?.seatbid?.[0]?.bid?.[0]?.adm;
 
-            if (
-                impressionStatus >= 200 &&
-                impressionStatus < 400
-            ) {
-              stats.impFired += 1;
+              const shot = await shooter.firePixel({
+                adm,
+                pixelUrl: pixels[0],
+                clickUrl: clickUrls[0],
+                ua,
+                proxy: bridge ? { server: bridge.url } : undefined,
+                device: {
+                  width: body?.device?.w ?? 360,
+                  height: body?.device?.h ?? 640,
+                  pixelRatio: body?.device?.pxratio ?? 3,
+                },
+              });
+
+              // Fire remaining pixels through the same browser context
+              for (let i = 1; i < pixels.length; i += 1) {
+                await shooter.firePixel({
+                  adm,
+                  pixelUrl: pixels[i],
+                  ua,
+                  proxy: bridge ? { server: bridge.url } : undefined,
+                  device: {
+                    width: body?.device?.w ?? 360,
+                    height: body?.device?.h ?? 640,
+                    pixelRatio: body?.device?.pxratio ?? 3,
+                  },
+                });
+              }
+
+              /*
+               * Click URLs are extracted from DOM inside firePixel().
+               * clickUrl: clickUrls[0] above is kept as a fallback.
+               */
+
+              if (shot.ok) {
+                stats.impFired += 1;
+              } else {
+                stats.impErr += 1;
+                stats.lastError =
+                    shot.error ?? 'Browser pixel: no hit';
+              }
             } else {
-              stats.impErr += 1;
-              stats.lastError =
-                  `Impression HTTP ${impressionStatus}`;
+              /*
+               * Undici path: fire from the same simulated device: same IP
+               * and same UA as the auction request, so the exchange can
+               * match the impression back to the bid it served. Pass
+               * androidProfile=true so the headers (sec-ch-ua, accept,
+               * accept-encoding, sec-fetch-*) are built from the UA and
+               * sent via undici (not fetch), which avoids fetch's
+               * sec-fetch-* rewriting.
+               *
+               * Pass tlsFacts={} so buildTlsFactsHeader() uses the default
+               * Chrome Android TLS fingerprint for the x-adx-tls header.
+               */
+              const impressionStatus = await fireImpression(pixels[0], {
+                ua,
+                androidProfile: true,
+                tlsFacts: {},
+                headers: {
+                  'x-forwarded-for': ip,
+                  'x-real-ip': ip,
+                },
+              });
+
+              // Fire remaining impression pixels
+              for (let i = 1; i < pixels.length; i += 1) {
+                try {
+                  await fireImpression(pixels[i], {
+                    ua,
+                    androidProfile: true,
+                    tlsFacts: {},
+                    headers: {
+                      'x-forwarded-for': ip,
+                      'x-real-ip': ip,
+                    },
+                  });
+                } catch {
+                  /* Pixel fire is best-effort. */
+                }
+              }
+
+              /*
+               * Fire all click URLs through the same simulated device if any
+               * were present. This keeps every click on the same IP as the
+               * impression and auction.
+               */
+              for (const clickUrl of clickUrls) {
+                try {
+                  await fireImpression(clickUrl, {
+                    ua,
+                    androidProfile: true,
+                    tlsFacts: {},
+                    headers: {
+                      'x-forwarded-for': ip,
+                      'x-real-ip': ip,
+                    },
+                  });
+                } catch {
+                  /* Click fire is best-effort. */
+                }
+              }
+
+              let ok = impressionStatus >= 200 && impressionStatus < 400;
+
+              if (ok) {
+                stats.impFired += 1;
+              } else {
+                stats.impErr += 1;
+                stats.lastError =
+                    `Impression HTTP ${impressionStatus}`;
+              }
             }
           } catch (err) {
             stats.impErr += 1;
