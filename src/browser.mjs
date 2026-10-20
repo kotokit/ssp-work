@@ -578,6 +578,8 @@ export class PixelShooter {
         };
         captured.push(recorded);
 
+        console.error('[browser] Fetch.requestPaused:', req.method, req.url, 'id:', event.requestId, 'postData:', req.hasPostData ? 'yes' : 'no');
+
         const major = parseChromeMajor(ua);
         const isWv = /;\s*wv\)/.test(String(ua));
 
@@ -596,6 +598,8 @@ export class PixelShooter {
          */
         const postData = body ? Buffer.from(body).toString('base64') : undefined;
 
+        console.error('[browser] Sending Fetch.continueRequest, id:', event.requestId, 'postDataLen:', (postData || '').length, 'headersCount:', (Object.entries(req.headers).length + overrides.length));
+
         cdp.send('Fetch.continueRequest', {
           requestId: event.requestId,
           ...(postData ? { postData } : {}),
@@ -603,7 +607,8 @@ export class PixelShooter {
             ...Object.entries(req.headers).map(([name, value]) => ({ name, value: String(value) })),
             ...overrides,
           ],
-        }).catch(() => {
+        }).catch((err) => {
+          console.error('[browser] Fetch.continueRequest failed:', err?.message);
           cdp.send('Fetch.continueRequest', { requestId: event.requestId }).catch(() => {});
         });
       });
