@@ -581,8 +581,14 @@ export class PixelShooter {
       // through the browser's full network stack (TLS, HTTP/2, client hints).
       await page.goto('about:blank', { timeout: 10_000 }).catch(() => {});
 
+      // Capture console messages from the page context
+      page.on('console', (msg) => {
+        console.error('[browser] page console:', msg.text());
+      });
+
       const auctionResult = await page.evaluate(
-        async ({ url, body, headers, secChUa, timeoutMs }) => {
+        async ({ url, body, headers, timeoutMs }) => {
+          console.error('[browser] evaluate: fetching', url);
           const controller = new AbortController();
           const timer = setTimeout(() => controller.abort(), timeoutMs);
           try {
@@ -592,6 +598,7 @@ export class PixelShooter {
               body,
               signal: controller.signal,
             });
+            console.error('[browser] evaluate: got response status', resp.status);
             const status = resp.status;
             let json = null;
             let text = '';
@@ -600,6 +607,9 @@ export class PixelShooter {
               try { json = JSON.parse(text); } catch { json = null; }
             }
             return { status, text, json };
+          } catch (err) {
+            console.error('[browser] evaluate: fetch error:', String(err?.message ?? err));
+            throw err;
           } finally {
             clearTimeout(timer);
           }
