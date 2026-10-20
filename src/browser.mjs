@@ -552,14 +552,17 @@ export class PixelShooter {
 
     console.error('[browser] sendAuction: creating context with proxy=', effectiveProxy ? JSON.stringify(effectiveProxy) : 'null');
 
-    const context = await this.browser.newContext({
-      userAgent: ua,
-      viewport: { width: 360, height: 640 },
-      deviceScaleFactor: 3,
-      isMobile: true,
-      hasTouch: true,
-      ...(effectiveProxy ? { proxy: effectiveProxy } : {}),
-    });
+    const context = await Promise.race([
+      this.browser.newContext({
+        userAgent: ua,
+        viewport: { width: 360, height: 640 },
+        deviceScaleFactor: 3,
+        isMobile: true,
+        hasTouch: true,
+        ...(effectiveProxy ? { proxy: effectiveProxy } : {}),
+      }),
+      new Promise((_, rej) => setTimeout(() => rej(new Error('newContext timeout after 15s')), 15_000)),
+    ]);
 
     const captured = [];
     const wireHeaders = new Map();
