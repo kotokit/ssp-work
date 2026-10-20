@@ -516,6 +516,141 @@ export class PixelShooter {
     }
   }
 
+  /**
+   * Send an auction POST through this browser's context.
+   *
+   * WHY: a real Chromium request carries a genuine TLS ClientHello, HTTP/2
+   * SETTINGS frame, and coherent sec-fetch-* / sec-ch-ua* headers.
+   * Routing the auction through the browser closes the TLS fingerprint gap
+   * that undici leaves open — undici's TLS is Node's, not Chrome's.
+   *
+   * The browser context must already be configured with the proxy (via
+   * newContext({ proxy: ... })) so the auction leaves from the same IP.
+   *
+   * @param {object} options
+   * @param {string} options.url          auction endpoint
+   * @param {string} options.body         JSON-serialised OpenRTB request
+   * @param {string} options.ua           device user agent (for sec-ch-ua hints)
+   * @param {object} [options.proxy]      proxy config for the browser context
+   * @param {number} [options.timeoutMs]
+   * @returns {Promise<{status: number, headers: object, text: string, json: object|null, ok: boolean, requests?: object[]}>}
+   */
+  async sendAuction({ url, body, ua, proxy, timeoutMs = 10_000 }) {
+    if (!this.browser) await this.start();
+
+    const context = await this.browser.newContext({
+      userAgent: ua,
+      viewport: { width: 360, height: 640 },
+      deviceScaleFactor: 3,
+      isMobile: true,
+      hasTouch: true,
+      ...(proxy ? { proxy } : {}),
+    });
+
+    const captured = [];
+    const wireHeaders = new Map();
+
+    try {
+      const page = await context.newPage();
+      const cdp = await context.newCDPSession(page);
+
+      await cdp.send('Network.enable');
+      await cdp.send('Fetch.enable', {
+        patterns: [{ urlPattern: '*', requestStage: 'Request' }],
+      });
+
+      cdp.on('Network.requestWillBeSentExtraInfo', (event) => {
+        wireHeaders.set(event.requestId, event.headers);
+      });
+
+      cdp.on('Fetch.requestPaused', (event) => {
+        const req = event.request;
+        const recorded = {
+          url: req.url,
+          method: req.method,
+          headers: wireHeaders.get(event.requestId) ?? req.headers,
+        };
+        captured.push(recorded);
+
+        const major = parseChromeMajor(ua);
+        const isWv = /;\s*wv\)/.test(String(ua));
+
+        const overrides = [];
+        if (major) {
+          overrides.push(
+            { name: 'sec-ch-ua', value: buildBrandList(major, { webview: isWv }) },
+            { name: 'sec-ch-ua-mobile', value: '?1' },
+            { name: 'sec-ch-ua-platform', value: '"Android"' },
+          );
+        }
+
+        cdp.send('Fetch.continueRequest', {
+          requestId: event.requestId,
+          headers: [
+            ...Object.entries(req.headers).map(([name, value]) => ({ name, value: String(value) })),
+            ...overrides,
+          ],
+        }).catch(() => {
+          cdp.send('Fetch.continueRequest', { requestId: event.requestId }).catch(() => {});
+        });
+      });
+
+      cdp.on('Network.responseReceived', (event) => {
+        const entry = captured.find((c) => c.url === event.response.url);
+        if (entry) entry.status = event.response.status;
+      });
+
+      await page.goto(url, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Accept': IMAGE_ACCEPT,
+        },
+        postBody: {
+          payload: body,
+          encoding: 'Utf8',
+        },
+        timeout: timeoutMs,
+      }).catch(() => {});
+
+      await page.waitForTimeout(1500);
+
+      const status = captured.length > 0 ? (captured[0].status ?? 0) : 0;
+      const responseText = captured.length > 0 ? '' : '';
+      let jsonResponse = null;
+
+      try {
+        if (captured.length > 0 && status === 200) {
+          const text = captured[0].text || '';
+          jsonResponse = text ? JSON.parse(text) : null;
+        }
+      } catch {
+        jsonResponse = null;
+      }
+
+      return {
+        status,
+        headers: captured.length > 0 ? captured[0].headers ?? {} : {},
+        text: responseText,
+        json: jsonResponse,
+        ok: status >= 200 && status < 400,
+        requests: captured,
+      };
+    } catch (error) {
+      return {
+        status: 0,
+        headers: {},
+        text: '',
+        json: null,
+        ok: false,
+        error: String(error?.message ?? error),
+        requests: captured,
+      };
+    } finally {
+      await context.close().catch(() => {});
+    }
+  }
+
   async close() {
     if (this.browser) {
       await this.browser.close().catch(() => {});

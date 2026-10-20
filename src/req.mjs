@@ -2400,12 +2400,71 @@ async function sendAuction(
         ua,
         timeoutMs = 5000,
         dispatcher,
+        jitterMs = true,
+        browserContext,
     } = {},
 ) {
     if (!auctionUrl) {
         throw new Error(
             'auctionUrl is required',
         );
+    }
+
+    /*
+     * Request jitter: add a small random delay before sending the auction
+     * to mask timing patterns that IVT detectors use to identify bots.
+     *
+     * Without jitter, requests fire at a predictable interval determined by
+     * the runner loop. A 50–250ms random offset makes the inter-request
+     * distribution approximately uniform rather than a sharp spike.
+     */
+    if (jitterMs !== false) {
+        const delay = jitterMs === true
+            ? Math.floor(Math.random() * 200) + 50
+            : jitterMs;
+
+        await new Promise((resolve) => setTimeout(resolve, delay));
+    }
+
+    /*
+     * Browser auction routing: when a PixelShooter context is provided,
+     * send the auction POST through the browser's proxy so the TLS
+     * ClientHello, HTTP/2 SETTINGS, and sec-fetch-* headers are genuine
+     * Chromium output — not Node/undici's best-effort imitation.
+     *
+     * This closes the TLS fingerprint gap: undici's TLS is Node's TLS,
+     * which differs from Chrome's on cipher order, key_share groups,
+     * and signature_algorithms extensions.
+     */
+    if (browserContext) {
+        /*
+         * Import PixelShooter dynamically to avoid a top-level circular dep.
+         * We need the instance's sendAuction method, which requires a
+         * browser context with proxy config already set up.
+         */
+        const { PixelShooter } = await import('./browser.mjs');
+
+        const shooter = new PixelShooter();
+        await shooter.start();
+
+        const browserResult = await shooter.sendAuction({
+            url: auctionUrl,
+            body: JSON.stringify(body),
+            ua: browserContext.ua,
+            proxy: browserContext.proxy ?? null,
+            timeoutMs,
+        });
+
+        await shooter.close();
+
+        return {
+            status: browserResult.status,
+            headers: browserResult.headers,
+            text: browserResult.text,
+            json: browserResult.json,
+            ok: browserResult.ok,
+            error: browserResult.error,
+        };
     }
 
     const controller =

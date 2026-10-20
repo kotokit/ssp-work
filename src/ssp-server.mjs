@@ -956,6 +956,10 @@ async function main() {
           auctionUrl,
           supplyKey,
           ua,
+          browserContext: shooter ? {
+            ua,
+            proxy: bridge ? { server: bridge.url } : undefined,
+          } : undefined,
         });
       } finally {
         auctionLatency.add(

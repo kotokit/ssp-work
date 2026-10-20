@@ -354,6 +354,10 @@ async function main() {
       supplyKey: '',
       ua,
       dispatcher: local ? undefined : session.dispatcher,
+      browserContext: shooter ? {
+        ua,
+        proxy: shooter.proxy,
+      } : undefined,
     });
 
     if (result.status === 0) {

@@ -321,6 +321,10 @@ async function main() {
           supplyKey: '',
           ua,
           dispatcher: local ? undefined : session.dispatcher,
+          browserContext: shooter ? {
+            ua,
+            proxy: { server: bridge.url },
+          } : undefined,
         });
 
         if (result.status === 0) {
