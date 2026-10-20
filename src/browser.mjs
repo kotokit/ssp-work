@@ -582,10 +582,8 @@ export class PixelShooter {
 
       const secChUa = major ? buildBrandList(major, { webview: isWv }) : undefined;
 
-      /*
-       * Use a broad pattern so page.goto() with method:POST triggers it.
-       * page.route(url, ...) sometimes misses the goto request; '**/*' pattern matches all URLs.
-       */
+      // Use a broad pattern so page.goto() with method:POST triggers it.
+      // page.route(url, ...) sometimes misses the goto request; '**/*' pattern matches all URLs.
       await page.route('**/*', async (route) => {
         const req = route.request();
         const recorded = {
