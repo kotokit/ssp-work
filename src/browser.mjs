@@ -571,32 +571,42 @@ export class PixelShooter {
         if (entry) entry.status = event.response.status;
       });
 
-      /*
-       * Use page.route() (Playwright-native interception) instead of
-       * CDP Fetch domain.  page.goto({ method: 'POST', postBody }) bypasses
-       * Fetch.requestPaused entirely — page.route() intercepts the request
-       * at the Playwright level where the body is available.
-       */
       const major = parseChromeMajor(ua);
       const isWv = /;\s*wv\)/.test(String(ua));
-
       const secChUa = major ? buildBrandList(major, { webview: isWv }) : undefined;
 
-      // Use a broad pattern so page.goto() with method:POST triggers it.
-      // page.route(url, ...) sometimes misses the goto request; '**/*' pattern matches all URLs.
-      await page.route('**/*', async (route) => {
-        const req = route.request();
-        const recorded = {
-          url: req.url(),
-          method: req.method(),
-          headers: wireHeaders.get(req.id()) ?? req.headers(),
-        };
-        captured.push(recorded);
+      // page.goto({ method: 'POST', postBody }) bypasses both CDP Fetch and
+      // context.route().  Navigate to blank first, then use page.evaluate()
+      // to send the POST via fetch() — this guarantees the request passes
+      // through the browser's full network stack (TLS, HTTP/2, client hints).
+      await page.goto('about:blank', { timeout: 10_000 }).catch(() => {});
 
-        console.error('[browser] route.continue:', req.method(), req.url());
-
-        await route.continue({
-          method: 'POST',
+      const auctionResult = await page.evaluate(
+        async ({ url, body, headers, secChUa, timeoutMs }) => {
+          const controller = new AbortController();
+          const timer = setTimeout(() => controller.abort(), timeoutMs);
+          try {
+            const resp = await fetch(url, {
+              method: 'POST',
+              headers,
+              body,
+              signal: controller.signal,
+            });
+            const status = resp.status;
+            let json = null;
+            let text = '';
+            if (resp.status === 200) {
+              text = await resp.text();
+              try { json = JSON.parse(text); } catch { json = null; }
+            }
+            return { status, text, json };
+          } finally {
+            clearTimeout(timer);
+          }
+        },
+        {
+          url,
+          body,
           headers: {
             'Content-Type': 'application/json',
             'Accept': IMAGE_ACCEPT,
@@ -604,40 +614,18 @@ export class PixelShooter {
             'sec-ch-ua-mobile': '?1',
             'sec-ch-ua-platform': '"Android"',
           },
-          postData: body,
-        });
-      });
-
-      await page.goto(url, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'Accept': IMAGE_ACCEPT,
+          timeoutMs,
         },
-        postBody: {
-          payload: body,
-          encoding: 'Utf8',
-        },
-        timeout: timeoutMs,
-      }).catch(() => {});
+      );
 
-      await page.waitForTimeout(1500);
-
-      const status = captured.length > 0 ? (captured[0].status ?? 0) : 0;
-      let jsonResponse = null;
-
-      if (captured.length > 0 && status === 200) {
-        try {
-          jsonResponse = JSON.parse(captured[0].text || '');
-        } catch {
-          jsonResponse = null;
-        }
-      }
+      const status = auctionResult?.status ?? 0;
+      const jsonResponse = auctionResult?.json ?? null;
+      const responseText = auctionResult?.text ?? '';
 
       return {
         status,
-        headers: captured.length > 0 ? captured[0].headers ?? {} : {},
-        text: captured.length > 0 ? captured[0].text || '' : '',
+        headers: {},
+        text: responseText,
         json: jsonResponse,
         ok: status >= 200 && status < 400,
         requests: captured,
