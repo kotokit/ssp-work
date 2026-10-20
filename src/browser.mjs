@@ -586,6 +586,8 @@ export class PixelShooter {
         console.error('[browser] page console:', msg.text());
       });
 
+      console.error('[browser] sendAuction: about blank loaded, about to page.evaluate');
+
       const auctionResult = await page.evaluate(
         async ({ url, body, headers, timeoutMs }) => {
           console.error('[browser] evaluate: fetching', url);
