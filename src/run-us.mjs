@@ -251,8 +251,8 @@ async function main() {
       onLog: verbose ? (m) => console.error(dim(`[bridge] ${m}`)) : undefined,
     });
 
-    if (!bridge.ok) {
-      console.error(red(`\nProxy bridge failed: ${bridge.error}`));
+    if (!bridge?.url) {
+      console.error(red(`\nProxy bridge failed: ${bridge?.error ?? 'no url'}`));
       await session.close();
       return 1;
     }
