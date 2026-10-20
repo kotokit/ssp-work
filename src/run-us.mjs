@@ -247,7 +247,7 @@ async function main() {
   if (useBrowser) {
     const bridgePort = 9100;
     bridge = await startProxyBridge({
-      upstream: session.proxyUrl,
+      upstream: session._proxy,
       onLog: verbose ? (m) => console.error(dim(`[bridge] ${m}`)) : undefined,
     });
 

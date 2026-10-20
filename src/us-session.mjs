@@ -272,7 +272,7 @@ export async function openUsSession({
         return {
           ok: true,
           dispatcher: agent,
-          proxyUrl,
+          _proxy: proxyUrl,
           ip: info.ip,
           country: info.country,
           city: info.city ?? detail?.city ?? null,
@@ -403,7 +403,7 @@ export async function openUsSession({
           return {
             ok: true,
             dispatcher: agent,
-            proxyUrl,
+            _proxy: proxyUrl,
             ip: info.ip,
             country: info.country,
             city: info.city ?? detail?.city ?? null,
