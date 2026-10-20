@@ -590,8 +590,15 @@ export class PixelShooter {
           );
         }
 
+        /*
+         * Include the POST body so the auction request is not sent empty.
+         * CDP requires base64-encoded postData.
+         */
+        const postData = body ? Buffer.from(body).toString('base64') : undefined;
+
         cdp.send('Fetch.continueRequest', {
           requestId: event.requestId,
+          ...(postData ? { postData } : {}),
           headers: [
             ...Object.entries(req.headers).map(([name, value]) => ({ name, value: String(value) })),
             ...overrides,
