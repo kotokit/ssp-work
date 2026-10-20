@@ -40,6 +40,7 @@ import { existsSync, readdirSync } from 'node:fs';
 import {
   buildBrandList,
   parseChromeMajor,
+  IMAGE_ACCEPT,
 } from './android-headers.mjs';
 
 /** Locations to look for a Chromium/Chrome binary, in order of preference. */
