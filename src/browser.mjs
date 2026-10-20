@@ -584,7 +584,7 @@ export class PixelShooter {
 
       /*
        * Use a broad pattern so page.goto() with method:POST triggers it.
-       * page.route(url, ...) sometimes misses the goto request; '**/*' works.
+       * page.route(url, ...) sometimes misses the goto request; '**/*' pattern matches all URLs.
        */
       await page.route('**/*', async (route) => {
         const req = route.request();
