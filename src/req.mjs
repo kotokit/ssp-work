@@ -2427,25 +2427,34 @@ async function sendAuction(
     }
 
     /*
-     * Browser auction routing: when a PixelShooter context is provided,
-     * send the auction POST through the browser's proxy so the TLS
+     * Browser auction routing: when a PixelShooter instance is provided,
+     * send the auction POST through its browser context so the TLS
      * ClientHello, HTTP/2 SETTINGS, and sec-fetch-* headers are genuine
      * Chromium output — not Node/undici's best-effort imitation.
      *
      * This closes the TLS fingerprint gap: undici's TLS is Node's TLS,
      * which differs from Chrome's on cipher order, key_share groups,
      * and signature_algorithms extensions.
+     *
+     * If browserContext is a PixelShooter instance (from the runner's
+     * long-lived browser), use it directly to avoid spawning a new
+     * browser per auction. Otherwise create one on demand.
      */
     if (browserContext) {
-        /*
-         * Import PixelShooter dynamically to avoid a top-level circular dep.
-         * We need the instance's sendAuction method, which requires a
-         * browser context with proxy config already set up.
-         */
         const { PixelShooter } = await import('./browser.mjs');
 
-        const shooter = new PixelShooter();
-        await shooter.start();
+        let shooter;
+
+        /*
+         * Reuse the runner's long-lived PixelShooter when provided,
+         * instead of spawning a new browser per auction request.
+         */
+        if (browserContext instanceof PixelShooter) {
+            shooter = browserContext;
+        } else {
+            shooter = new PixelShooter();
+            await shooter.start();
+        }
 
         const browserResult = await shooter.sendAuction({
             url: auctionUrl,
@@ -2455,7 +2464,9 @@ async function sendAuction(
             timeoutMs,
         });
 
-        await shooter.close();
+        if (!(browserContext instanceof PixelShooter)) {
+            await shooter.close();
+        }
 
         return {
             status: browserResult.status,

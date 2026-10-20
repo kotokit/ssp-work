@@ -573,6 +573,7 @@ async function main() {
     shooter = new PixelShooter({
       executablePath: findBrowserBinary(),
       verbose: true,
+      proxy: bridge ? { server: bridge.url } : undefined,
     });
     await shooter.start();
 
@@ -956,10 +957,7 @@ async function main() {
           auctionUrl,
           supplyKey,
           ua,
-          browserContext: shooter ? {
-            ua,
-            proxy: bridge ? { server: bridge.url } : undefined,
-          } : undefined,
+          browserContext: shooter ?? undefined,
         });
       } finally {
         auctionLatency.add(

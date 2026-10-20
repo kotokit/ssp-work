@@ -200,7 +200,11 @@ async function main() {
       onLog: (m) => { if (verbose) console.error(dim(`  [bridge] ${m}`)); },
     });
 
-    shooter = new PixelShooter({ executablePath: binary, verbose });
+    shooter = new PixelShooter({
+      executablePath: binary,
+      verbose,
+      proxy: bridge ? { server: bridge.url } : undefined,
+    });
     await shooter.start();
 
     console.log(`pixel       : headless Chromium  ${dim(binary)}`);
@@ -321,10 +325,7 @@ async function main() {
           supplyKey: '',
           ua,
           dispatcher: local ? undefined : session.dispatcher,
-          browserContext: shooter ? {
-            ua,
-            proxy: { server: bridge.url },
-          } : undefined,
+          browserContext: shooter ?? undefined,
         });
 
         if (result.status === 0) {

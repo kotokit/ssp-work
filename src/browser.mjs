@@ -159,10 +159,11 @@ async function extractClickUrlsFromDom(page) {
  * A reusable headless browser that fires pixels through a proxy.
  */
 export class PixelShooter {
-  constructor({ executablePath, headless = true, verbose = false } = {}) {
+  constructor({ executablePath, headless = true, verbose = false, proxy } = {}) {
     this.executablePath = executablePath ?? findBrowserBinary();
     this.headless = headless;
     this.verbose = verbose;
+    this.proxy = proxy ?? null;
     this.browser = null;
   }
 
@@ -236,6 +237,8 @@ export class PixelShooter {
   }) {
     if (!this.browser) await this.start();
 
+    const effectiveProxy = proxy ?? this.proxy;
+
     const context = await this.browser.newContext({
       userAgent: ua,
       viewport: { width: device.width, height: device.height },
@@ -243,7 +246,7 @@ export class PixelShooter {
       isMobile: device.mobile !== false,
       hasTouch: device.mobile !== false,
       locale: language,
-      ...(proxy ? { proxy } : {}),
+      ...(effectiveProxy ? { proxy: effectiveProxy } : {}),
     });
 
     const captured = [];
@@ -538,13 +541,15 @@ export class PixelShooter {
   async sendAuction({ url, body, ua, proxy, timeoutMs = 10_000 }) {
     if (!this.browser) await this.start();
 
+    const effectiveProxy = proxy ?? this.proxy;
+
     const context = await this.browser.newContext({
       userAgent: ua,
       viewport: { width: 360, height: 640 },
       deviceScaleFactor: 3,
       isMobile: true,
       hasTouch: true,
-      ...(proxy ? { proxy } : {}),
+      ...(effectiveProxy ? { proxy: effectiveProxy } : {}),
     });
 
     const captured = [];

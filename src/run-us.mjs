@@ -260,6 +260,7 @@ async function main() {
     shooter = new PixelShooter({
       executablePath: findBrowserBinary(),
       verbose: true,
+      proxy: bridge ? { server: bridge.url } : undefined,
     });
     await shooter.start();
 
@@ -354,10 +355,7 @@ async function main() {
       supplyKey: '',
       ua,
       dispatcher: local ? undefined : session.dispatcher,
-      browserContext: shooter ? {
-        ua,
-        proxy: shooter.proxy,
-      } : undefined,
+      browserContext: shooter ?? undefined,
     });
 
     if (result.status === 0) {
