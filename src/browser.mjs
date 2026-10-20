@@ -540,9 +540,17 @@ export class PixelShooter {
    * @returns {Promise<{status: number, headers: object, text: string, json: object|null, ok: boolean, requests?: object[]}>}
    */
   async sendAuction({ url, body, ua, proxy, timeoutMs = 10_000 }) {
-    if (!this.browser) await this.start();
+    console.error('[browser] sendAuction ENTER url=', url, 'ua=', String(ua)?.slice(0, 60), 'proxy=', proxy ? JSON.stringify(proxy) : 'null', 'timeoutMs=', timeoutMs);
+    if (!this.browser) {
+      console.error('[browser] sendAuction: browser not started, starting now');
+      await this.start();
+    } else {
+      console.error('[browser] sendAuction: browser already running');
+    }
 
     const effectiveProxy = proxy ?? this.proxy;
+
+    console.error('[browser] sendAuction: creating context with proxy=', effectiveProxy ? JSON.stringify(effectiveProxy) : 'null');
 
     const context = await this.browser.newContext({
       userAgent: ua,
@@ -558,6 +566,8 @@ export class PixelShooter {
 
     try {
       const page = await context.newPage();
+      console.error('[browser] sendAuction: page created, setting up CDP');
+
       const cdp = await context.newCDPSession(page);
 
       await cdp.send('Network.enable');
@@ -575,11 +585,15 @@ export class PixelShooter {
       const isWv = /;\s*wv\)/.test(String(ua));
       const secChUa = major ? buildBrandList(major, { webview: isWv }) : undefined;
 
+      console.error('[browser] sendAuction: major=', major, 'isWv=', isWv, 'secChUa=', secChUa ? secChUa.slice(0, 80) : 'null');
+
       // page.goto({ method: 'POST', postBody }) bypasses both CDP Fetch and
       // context.route().  Navigate to blank first, then use page.evaluate()
       // to send the POST via fetch() — this guarantees the request passes
       // through the browser's full network stack (TLS, HTTP/2, client hints).
+      console.error('[browser] sendAuction: navigating to about:blank');
       await page.goto('about:blank', { timeout: 10_000 }).catch(() => {});
+      console.error('[browser] sendAuction: about:blank loaded');
 
       // Capture console messages from the page context
       page.on('console', (msg) => {
@@ -587,10 +601,13 @@ export class PixelShooter {
       });
 
       console.error('[browser] sendAuction: about blank loaded, about to page.evaluate');
+      console.error('[browser] sendAuction: headers to send=', JSON.stringify(headers));
 
       const auctionResult = await page.evaluate(
         async ({ url, body, headers, timeoutMs }) => {
-          console.error('[browser] evaluate: fetching', url);
+          console.log('[browser] evaluate: fetching', url);
+          console.log('[browser] evaluate: headers=', JSON.stringify(headers));
+          console.log('[browser] evaluate: body length=', body?.length);
           const controller = new AbortController();
           const timer = setTimeout(() => controller.abort(), timeoutMs);
           try {
@@ -600,7 +617,7 @@ export class PixelShooter {
               body,
               signal: controller.signal,
             });
-            console.error('[browser] evaluate: got response status', resp.status);
+            console.log('[browser] evaluate: got response status', resp.status);
             const status = resp.status;
             let json = null;
             let text = '';
@@ -610,7 +627,7 @@ export class PixelShooter {
             }
             return { status, text, json };
           } catch (err) {
-            console.error('[browser] evaluate: fetch error:', String(err?.message ?? err));
+            console.log('[browser] evaluate: fetch error:', String(err?.message ?? err));
             throw err;
           } finally {
             clearTimeout(timer);

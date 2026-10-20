@@ -2459,7 +2459,7 @@ async function sendAuction(
         const browserResult = await shooter.sendAuction({
             url: auctionUrl,
             body: JSON.stringify(body),
-            ua: browserContext.ua,
+            ua,
             proxy: browserContext.proxy ?? null,
             timeoutMs,
         });
