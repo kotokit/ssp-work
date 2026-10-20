@@ -561,61 +561,49 @@ export class PixelShooter {
       const cdp = await context.newCDPSession(page);
 
       await cdp.send('Network.enable');
-      await cdp.send('Fetch.enable', {
-        patterns: [{ urlPattern: '*', requestStage: 'Request' }],
-      });
 
       cdp.on('Network.requestWillBeSentExtraInfo', (event) => {
         wireHeaders.set(event.requestId, event.headers);
       });
 
-      cdp.on('Fetch.requestPaused', (event) => {
-        const req = event.request;
-        const recorded = {
-          url: req.url,
-          method: req.method,
-          headers: wireHeaders.get(event.requestId) ?? req.headers,
-        };
-        captured.push(recorded);
-
-        console.error('[browser] Fetch.requestPaused:', req.method, req.url, 'id:', event.requestId, 'postData:', req.hasPostData ? 'yes' : 'no');
-
-        const major = parseChromeMajor(ua);
-        const isWv = /;\s*wv\)/.test(String(ua));
-
-        const overrides = [];
-        if (major) {
-          overrides.push(
-            { name: 'sec-ch-ua', value: buildBrandList(major, { webview: isWv }) },
-            { name: 'sec-ch-ua-mobile', value: '?1' },
-            { name: 'sec-ch-ua-platform', value: '"Android"' },
-          );
-        }
-
-        /*
-         * Include the POST body so the auction request is not sent empty.
-         * CDP requires base64-encoded postData.
-         */
-        const postData = body ? Buffer.from(body).toString('base64') : undefined;
-
-        console.error('[browser] Sending Fetch.continueRequest, id:', event.requestId, 'postDataLen:', (postData || '').length, 'headersCount:', (Object.entries(req.headers).length + overrides.length));
-
-        cdp.send('Fetch.continueRequest', {
-          requestId: event.requestId,
-          ...(postData ? { postData } : {}),
-          headers: [
-            ...Object.entries(req.headers).map(([name, value]) => ({ name, value: String(value) })),
-            ...overrides,
-          ],
-        }).catch((err) => {
-          console.error('[browser] Fetch.continueRequest failed:', err?.message);
-          cdp.send('Fetch.continueRequest', { requestId: event.requestId }).catch(() => {});
-        });
-      });
-
       cdp.on('Network.responseReceived', (event) => {
         const entry = captured.find((c) => c.url === event.response.url);
         if (entry) entry.status = event.response.status;
+      });
+
+      /*
+       * Use page.route() (Playwright-native interception) instead of
+       * CDP Fetch domain.  page.goto({ method: 'POST', postBody }) bypasses
+       * Fetch.requestPaused entirely — page.route() intercepts the request
+       * at the Playwright level where the body is available.
+       */
+      const major = parseChromeMajor(ua);
+      const isWv = /;\s*wv\)/.test(String(ua));
+
+      const secChUa = major ? buildBrandList(major, { webview: isWv }) : undefined;
+
+      await page.route(url, async (route) => {
+        const req = route.request();
+        const recorded = {
+          url: req.url(),
+          method: req.method(),
+          headers: wireHeaders.get(req.id()) ?? req.headers(),
+        };
+        captured.push(recorded);
+
+        console.error('[browser] route.continue:', req.method(), req.url());
+
+        await route.continue({
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'Accept': IMAGE_ACCEPT,
+            ...(secChUa ? { 'sec-ch-ua': secChUa } : {}),
+            'sec-ch-ua-mobile': '?1',
+            'sec-ch-ua-platform': '"Android"',
+          },
+          postData: body,
+        });
       });
 
       await page.goto(url, {
@@ -634,22 +622,20 @@ export class PixelShooter {
       await page.waitForTimeout(1500);
 
       const status = captured.length > 0 ? (captured[0].status ?? 0) : 0;
-      const responseText = captured.length > 0 ? '' : '';
       let jsonResponse = null;
 
-      try {
-        if (captured.length > 0 && status === 200) {
-          const text = captured[0].text || '';
-          jsonResponse = text ? JSON.parse(text) : null;
+      if (captured.length > 0 && status === 200) {
+        try {
+          jsonResponse = JSON.parse(captured[0].text || '');
+        } catch {
+          jsonResponse = null;
         }
-      } catch {
-        jsonResponse = null;
       }
 
       return {
         status,
         headers: captured.length > 0 ? captured[0].headers ?? {} : {},
-        text: responseText,
+        text: captured.length > 0 ? captured[0].text || '' : '',
         json: jsonResponse,
         ok: status >= 200 && status < 400,
         requests: captured,
