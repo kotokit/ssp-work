@@ -116,7 +116,8 @@ export async function startProxyBridge({
       const direct = http.request(
           { host: hostPart, port: portPart, method: req.method, path: targetPath ?? req.url, headers: req.headers },
           (directRes) => {
-            res.writeHead(directRes.statusCode ?? 502, directRes.headers);
+            const respHeaders = { ...directRes.headers, 'access-control-allow-origin': '*' };
+            res.writeHead(directRes.statusCode ?? 502, respHeaders);
             directRes.pipe(res);
           },
       );
