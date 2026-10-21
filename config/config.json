@@ -1,0 +1,50 @@
+{
+  "url": "https://rtb.adspiro.io/openrtb2/auction?key=pubfuture-banner-ia_c7729ec5d8f7175ee5e32de156a6ece9",
+  "load": {
+    "qps": 10,
+    "winRate": { "min": 0.05, "max": 0.15 },
+    "stopAfter": { "impressions": 10, "requests": 100, "seconds": null },
+    "maxInFlight": 50,
+    "cpmRange": { "min": 0.01, "max": 0.10 },
+    "clickDelay": { "min": 2000, "max": 5000 }
+  },
+  "traffic": {
+    "formats": ["banner"],
+    "fireImpressions": true,
+
+    "appSource": "fixtures",
+
+    "badv": [
+      "app-central.com",
+      "gamnest.com",
+      "hadizstudio.com",
+      "herofighting-games.com",
+      "mr-bunn.com",
+      "offlinegleeapps.com",
+      "timeto-move.com",
+      "tri-angular.com"
+    ],
+
+    "displayManagers": [
+      { "name": "BidMachine", "ver": "3.3.0" },
+      { "name": "third_party_sdk", "ver": "7.7.4" },
+      { "name": "third_party_sdk", "ver": "4.9.1" },
+      { "name": "third_party_sdk", "ver": "0" }
+    ],
+
+    "bannerSizes": [
+      [320, 50],
+      [300, 250]
+    ],
+
+    "sellers": [
+      { "publisherId": "500174", "weight": 9, "label": "Sofascore portfolio" },
+      { "publisherId": "500243", "weight": 1, "label": "BidMachine chain" }
+    ]
+  },
+  "inputs": {
+    "ipPoolFile": "data/ip_pool.json",
+    "uaFile": "data/user_agents.csv"
+  },
+  "control": { "port": 8200 }
+}
