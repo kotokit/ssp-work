@@ -109,6 +109,7 @@ export async function startProxyBridge({
 
     if (isLoopback(targetHost)) {
       stats.bypassed += 1;
+      onLog(`bypassing loopback to ${targetHost}${targetPath}`);
 
       const hostPart = String(targetHost).split(':')[0];
       const portPart = Number(String(targetHost).split(':')[1] ?? 80);
@@ -116,13 +117,15 @@ export async function startProxyBridge({
       const direct = http.request(
           { host: hostPart, port: portPart, method: req.method, path: targetPath ?? req.url, headers: req.headers },
           (directRes) => {
+            onLog(`bypass response: ${directRes.statusCode} headers=${JSON.stringify(Object.keys(directRes.headers))}`);
             const respHeaders = { ...directRes.headers, 'access-control-allow-origin': '*' };
             res.writeHead(directRes.statusCode ?? 502, respHeaders);
             directRes.pipe(res);
           },
       );
 
-      direct.on('error', () => {
+      direct.on('error', (err) => {
+        onLog(`bypass error: ${String(err?.message ?? err)}`);
         if (!res.headersSent) res.writeHead(502);
         res.end('bridge bypass error');
       });
@@ -144,7 +147,8 @@ export async function startProxyBridge({
           headers,
         },
         (upstreamRes) => {
-          res.writeHead(upstreamRes.statusCode ?? 502, upstreamRes.headers);
+          const respHeaders = { ...upstreamRes.headers, 'access-control-allow-origin': '*' };
+          res.writeHead(upstreamRes.statusCode ?? 502, respHeaders);
           upstreamRes.pipe(res);
         },
     );
