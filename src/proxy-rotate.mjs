@@ -174,6 +174,9 @@ export class ProxyRotationPool {
           session.city = result.value.city;
           session.resolved = true;
           resolved.push(session);
+          console.log(
+            `  session-${session.id.padEnd(8)} → ${result.value.ip.padEnd(15)} (${result.value.city ?? 'unknown'}, ${result.value.country ?? 'unknown'})`,
+          );
         } else {
           console.warn(
             `  ! session-${session.id}: ${result?.value?.error ?? 'unknown error'}`,
