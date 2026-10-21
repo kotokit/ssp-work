@@ -82,6 +82,7 @@ export async function startProxyBridge({
       net.connect(Number(upstreamUrl.port), upstreamUrl.hostname);
 
   const server = http.createServer((req, res) => {
+    onLog(`http request: ${req.method} ${req.url} from ${req.socket.remoteAddress}`);
     /*
      * Plain HTTP: req.url is absolute-form (http://host/path). Forward it
      * upstream with credentials.
@@ -89,18 +90,31 @@ export async function startProxyBridge({
     stats.http += 1;
 
     let targetHost;
+    let targetPath;
 
+    /*
+     * req.url is absolute-form (http://host/path) when the client is an HTTP
+     * proxy (Chromium).  For direct clients it may be a relative path such as
+     * /test or //test, so we fall back to the Host header.
+     */
     try {
-      targetHost = new URL(req.url).host;
+      const parsed = new URL(req.url);
+
+      targetHost = parsed.host;
+      targetPath = parsed.pathname + parsed.search;
     } catch {
       targetHost = req.headers.host ?? '';
+      targetPath = req.url;
     }
 
     if (isLoopback(targetHost)) {
       stats.bypassed += 1;
 
+      const hostPart = String(targetHost).split(':')[0];
+      const portPart = Number(String(targetHost).split(':')[1] ?? 80);
+
       const direct = http.request(
-          { host: targetHost.split(':')[0], port: Number(targetHost.split(':')[1] ?? 80), method: req.method, path: new URL(req.url).pathname + new URL(req.url).search, headers: req.headers },
+          { host: hostPart, port: portPart, method: req.method, path: targetPath ?? req.url, headers: req.headers },
           (directRes) => {
             res.writeHead(directRes.statusCode ?? 502, directRes.headers);
             directRes.pipe(res);
@@ -219,6 +233,7 @@ export async function startProxyBridge({
     });
 
   server.on('connect', async (req, clientSocket, head) => {
+    onLog(`connect request: ${req.url} from ${clientSocket.remoteAddress}`);
     stats.connect += 1;
 
     if (isLoopback(req.url)) {
