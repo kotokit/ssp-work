@@ -31,7 +31,7 @@ const bogonIp = (seed) => `240.0.${seed % 256}.${(seed % 253) + 1}`;
 const nib = (seed, len) => (seed >>> 0).toString(16).padStart(8, '0').repeat(2).slice(0, len);
 const fakeUuid = (seed) => `${nib(seed, 8)}-${nib(seed + 1, 4)}-4${nib(seed + 2, 3)}-8${nib(seed + 3, 3)}-${nib(seed + 4, 12)}`;
 
-const mkReq = ({ pub, bundle, ip, ifa, asi = 'test-ssp.example', storeurl, schainSid = pub }) => ({
+const mkReq = ({ pub, bundle, ip, ifa, asi = 'pubfuture.com', storeurl, schainSid = pub }) => ({
   id: `test-${ifa}`,
   app: {
     bundle,

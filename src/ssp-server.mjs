@@ -62,6 +62,7 @@ import {
   geoAvailable,
   geoPath,
 } from './geo.mjs';
+import { ProxyRotationPool } from './proxy-rotate.mjs';
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
 
@@ -405,6 +406,36 @@ async function main() {
     throw new Error('cpmRange.min/max must be non-negative numbers');
   }
 
+  /* ------------------------------------------------------------------------ */
+  /* clickDelay: random delay between impression and click firing             */
+  /* ------------------------------------------------------------------------ */
+
+  const clickDelayMin = Number(
+      cfg.load?.clickDelay?.min ?? 2000,
+  );
+  const clickDelayMax = Number(
+      cfg.load?.clickDelay?.max ?? 5000,
+  );
+
+  if (
+      !Number.isFinite(clickDelayMin) ||
+      clickDelayMin < 0 ||
+      !Number.isFinite(clickDelayMax) ||
+      clickDelayMax < 0 ||
+      clickDelayMin > clickDelayMax
+  ) {
+    throw new Error('clickDelay.min/max must satisfy 0 <= min <= max');
+  }
+
+  /**
+   * Generate a random delay in milliseconds within the configured range.
+   * Uses a uniform distribution across [min, max].
+   */
+  function randomClickDelay() {
+    return clickDelayMin +
+        Math.random() * (clickDelayMax - clickDelayMin);
+  }
+
   const format =
       args.values.get('--format') ??
       cfg.traffic.formats?.[0] ??
@@ -636,6 +667,34 @@ async function main() {
     };
   };
 
+  /*
+   * Proxy rotation pool: each session maps to a unique residential exit IP.
+   * One session is used per auction request, and the same session dispatcher
+   * is reused for the impression/click so they all originate from the same
+   * IP as the winning bid.
+   */
+  let proxyPool = null;
+
+  if (getProxyCredentials()) {
+    const proxyPoolSize = cfg.load?.proxyPoolSize ?? 20;
+    const proxyCountry = cfg.load?.proxyCountry ?? 'US';
+    const proxyTtl = cfg.load?.proxyTtl ?? 10;
+
+    console.log(
+        `creating proxy rotation pool: ${proxyPoolSize} sessions (${proxyCountry}, ${proxyTtl}m TTL)`,
+    );
+
+    try {
+      proxyPool = await ProxyRotationPool.create({
+        size: proxyPoolSize,
+        country: proxyCountry,
+        ttl: proxyTtl,
+      });
+    } catch (err) {
+      console.warn(`  !! proxy rotation pool creation failed: ${err.message}`);
+    }
+  }
+
   const stats = {
     startedAt: new Date().toISOString(),
 
@@ -779,9 +838,10 @@ async function main() {
       console.log(JSON.stringify(result, null, 2));
     }
 
-    // Close the browser shooter and proxy bridge.
+    // Close the browser shooter, proxy bridge, and proxy rotation pool.
     if (shooter) await shooter.close();
     if (bridge) await bridge.close();
+    if (proxyPool) await proxyPool.close();
 
     // Close the control listener once all outstanding attempts are drained.
     control.close(() => {
@@ -866,8 +926,14 @@ async function main() {
     let sellerId = 'unknown';
     let ip = null;
     let ua = null;
+    let proxySession = null;
 
     try {
+      /* Pick a proxy session so the auction and impression share the same exit IP. */
+      if (proxyPool) {
+        proxySession = proxyPool.next();
+      }
+
       ua = randUa();
 
       const deviceCheck = validateDevice(ua, parseDevice(ua));
@@ -958,6 +1024,7 @@ async function main() {
           supplyKey,
           ua,
           browserContext: shooter ?? undefined,
+          dispatcher: proxySession?.dispatcher,
         });
       } finally {
         auctionLatency.add(
@@ -1018,6 +1085,10 @@ async function main() {
                */
               const adm = json?.seatbid?.[0]?.bid?.[0]?.adm;
 
+              /* Delay before firing click (simulates realistic user behavior). */
+              const clickDelay = randomClickDelay();
+              await new Promise(resolve => setTimeout(resolve, clickDelay));
+
               const shot = await shooter.firePixel({
                 adm,
                 pixelUrl: pixels[0],
@@ -1075,6 +1146,7 @@ async function main() {
                 ua,
                 androidProfile: true,
                 tlsFacts: {},
+                dispatcher: proxySession?.dispatcher,
                 headers: {
                   'x-forwarded-for': ip,
                   'x-real-ip': ip,
@@ -1088,6 +1160,7 @@ async function main() {
                     ua,
                     androidProfile: true,
                     tlsFacts: {},
+                    dispatcher: proxySession?.dispatcher,
                     headers: {
                       'x-forwarded-for': ip,
                       'x-real-ip': ip,
@@ -1103,12 +1176,16 @@ async function main() {
                * were present. This keeps every click on the same IP as the
                * impression and auction.
                */
+              const clickDelayUndici = randomClickDelay();
+              await new Promise(resolve => setTimeout(resolve, clickDelayUndici));
+
               for (const clickUrl of clickUrls) {
                 try {
                   await fireImpression(clickUrl, {
                     ua,
                     androidProfile: true,
                     tlsFacts: {},
+                    dispatcher: proxySession?.dispatcher,
                     headers: {
                       'x-forwarded-for': ip,
                       'x-real-ip': ip,

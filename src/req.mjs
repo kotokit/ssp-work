@@ -1522,7 +1522,7 @@ function buildSchain(
                 asi:
                     traffic?.asi ||
                     app?.domain ||
-                    'admeridian.com',
+                    'pubfuture.com',
 
                 sid: String(
                     traffic?.sid ||
@@ -1855,14 +1855,17 @@ function buildApp({
         };
     }
 
-    if (traffic?.publisherName) {
-        built.publisher.name =
-            String(traffic.publisherName);
-    }
+    built.publisher.name =
+        String(
+            traffic?.publisherName ||
+            'PubFuture',
+        );
 
     if (traffic?.publisherDomain) {
         built.publisher.domain =
             String(traffic.publisherDomain);
+    } else {
+        built.publisher.domain = 'pubfuture.com';
     }
 
     return built;

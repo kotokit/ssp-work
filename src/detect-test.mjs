@@ -23,7 +23,7 @@ const ctx = {
       'TEST-SCHAIN-SELLER', 'TEST-BUNDLE-SELLER', 'TEST-IPV6-DC-SELLER', 'TEST-BOGON-SELLER',
       ...Array.from({ length: 60 }, (_, k) => `ROTATE-${k}`),
     ]),
-    asi: new Set(['test-ssp.example']),
+    asi: new Set(['pubfuture.com']),
   },
 };
 
