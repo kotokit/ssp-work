@@ -604,7 +604,14 @@ export class PixelShooter {
       });
 
       console.error('[browser] sendAuction: about blank loaded, about to page.evaluate');
-      console.error('[browser] sendAuction: headers to send=', JSON.stringify(headers));
+      const headersToSend = {
+        'Content-Type': 'application/json',
+        'Accept': IMAGE_ACCEPT,
+        ...(secChUa ? { 'sec-ch-ua': secChUa } : {}),
+        'sec-ch-ua-mobile': '?1',
+        'sec-ch-ua-platform': '"Android"',
+      };
+      console.error('[browser] sendAuction: headers to send=', JSON.stringify(headersToSend));
 
       const auctionResult = await page.evaluate(
         async ({ url, body, headers, timeoutMs }) => {
@@ -639,13 +646,7 @@ export class PixelShooter {
         {
           url,
           body,
-          headers: {
-            'Content-Type': 'application/json',
-            'Accept': IMAGE_ACCEPT,
-            ...(secChUa ? { 'sec-ch-ua': secChUa } : {}),
-            'sec-ch-ua-mobile': '?1',
-            'sec-ch-ua-platform': '"Android"',
-          },
+          headers: headersToSend,
           timeoutMs,
         },
       );
