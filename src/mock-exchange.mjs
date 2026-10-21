@@ -183,6 +183,18 @@ function main() {
       return;
     }
 
+    /* CORS preflight for the auction endpoint */
+    if (req.method === 'OPTIONS' && url.pathname === '/openrtb2/auction') {
+      res.writeHead(204, {
+        'access-control-allow-origin': '*',
+        'access-control-allow-methods': 'POST, OPTIONS',
+        'access-control-allow-headers': 'Content-Type, Accept',
+        'access-control-max-age': '86400',
+      });
+      res.end();
+      return;
+    }
+
     /* -------------------------------------------------------------------- */
     /* Impression pixel                                                     */
     /* -------------------------------------------------------------------- */
@@ -458,7 +470,9 @@ function main() {
         console.log(`no-bid      204  id=${request.id}`);
       }
 
-      res.writeHead(204);
+      res.writeHead(204, {
+        'access-control-allow-origin': '*',
+      });
       res.end();
       return;
     }
@@ -518,7 +532,10 @@ function main() {
 
     log({ type: 'bid', id: request.id, price: bidPrice, token });
 
-    res.writeHead(200, { 'content-type': 'application/json' });
+    res.writeHead(200, {
+      'content-type': 'application/json',
+      'access-control-allow-origin': '*',
+    });
     res.end(JSON.stringify(response));
 
     if (!quiet) {
