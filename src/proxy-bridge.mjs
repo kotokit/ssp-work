@@ -111,8 +111,12 @@ export async function startProxyBridge({
       stats.bypassed += 1;
       onLog(`bypassing loopback to ${targetHost}${targetPath}`);
 
-      const hostPart = String(targetHost).split(':')[0];
+      let hostPart = String(targetHost).split(':')[0];
       const portPart = Number(String(targetHost).split(':')[1] ?? 80);
+
+      // Resolve 'localhost' to 127.0.0.1 to avoid IPv6 (::1) connection
+      // failures when the target only listens on IPv4
+      if (hostPart === 'localhost') hostPart = '127.0.0.1';
 
       const direct = http.request(
           { host: hostPart, port: portPart, method: req.method, path: targetPath ?? req.url, headers: req.headers },
