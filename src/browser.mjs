@@ -417,77 +417,76 @@ export class PixelShooter {
       if (clickTargets.length > 0) {
         const uniqueUrls = [...new Set(clickTargets)];
 
+        const clickCaptured = [];
+        const clickWireHeaders = new Map();
+
+        /*
+         * Attach a single CDP session to capture click navigation
+         * headers across all click URLs.
+         */
+        const clickCdp = await context.newCDPSession(page);
+
+        await clickCdp.send('Network.enable');
+        await clickCdp.send('Fetch.enable', {
+          patterns: [{ urlPattern: '*', requestStage: 'Request' }],
+        });
+
+        clickCdp.on('Network.requestWillBeSentExtraInfo', (event) => {
+          clickWireHeaders.set(event.requestId, event.headers);
+        });
+
+        clickCdp.on('Fetch.requestPaused', (event) => {
+          const req = event.request;
+
+          const recorded = {
+            url: req.url,
+            method: req.method,
+            resourceType: event.resourceType,
+            headers: clickWireHeaders.get(event.requestId) ?? req.headers,
+          };
+          clickCaptured.push(recorded);
+
+          const major = parseChromeMajor(ua);
+          const isWv = /;\s*wv\)/.test(String(ua));
+
+          if (major) {
+            const overrides = [
+              { name: 'sec-ch-ua', value: buildBrandList(major, { webview: isWv }) },
+              { name: 'sec-ch-ua-mobile', value: '?1' },
+              { name: 'sec-ch-ua-platform', value: '"Android"' },
+            ];
+
+            clickCdp.send('Fetch.continueRequest', {
+              requestId: event.requestId,
+              headers: [
+                ...Object.entries(req.headers).map(([name, value]) => ({ name, value: String(value) })),
+                ...overrides,
+              ],
+            }).catch(() => {
+              clickCdp.send('Fetch.continueRequest', { requestId: event.requestId }).catch(() => {});
+            });
+
+            recorded.hintsRewritten = overrides.map((o) => `${o.name}=${o.value}`);
+            return;
+          }
+        });
+
+        clickCdp.on('Network.responseReceived', (event) => {
+          const entry = clickCaptured.find((c) => c.url === event.response.url && c.status === undefined);
+          if (entry) entry.status = event.response.status;
+        });
+
+        page.on('response', (res) => {
+          const entry = clickCaptured.find((c) => c.url === res.url() && c.status === undefined);
+          if (entry) entry.status = res.status();
+        });
+
+        page.on('requestfailed', (req) => {
+          const entry = clickCaptured.find((c) => c.url === req.url() && c.status === undefined && !c.failure);
+          if (entry) entry.failure = req.failure()?.errorText ?? 'failed';
+        });
+
         for (const url of uniqueUrls) {
-          const clickCaptured = [];
-
-          /*
-           * Attach a second CDP session to capture the click navigation
-           * headers independently.
-           */
-          const clickCdp = await context.newCDPSession(page);
-
-          await clickCdp.send('Network.enable');
-          await clickCdp.send('Fetch.enable', {
-            patterns: [{ urlPattern: '*', requestStage: 'Request' }],
-          });
-
-          const clickWireHeaders = new Map();
-
-          clickCdp.on('Network.requestWillBeSentExtraInfo', (event) => {
-            clickWireHeaders.set(event.requestId, event.headers);
-          });
-
-          clickCdp.on('Fetch.requestPaused', (event) => {
-            const req = event.request;
-
-            const recorded = {
-              url: req.url,
-              method: req.method,
-              resourceType: event.resourceType,
-              headers: clickWireHeaders.get(event.requestId) ?? req.headers,
-            };
-            clickCaptured.push(recorded);
-
-            const major = parseChromeMajor(ua);
-            const isWv = /;\s*wv\)/.test(String(ua));
-
-            if (major) {
-              const overrides = [
-                { name: 'sec-ch-ua', value: buildBrandList(major, { webview: isWv }) },
-                { name: 'sec-ch-ua-mobile', value: '?1' },
-                { name: 'sec-ch-ua-platform', value: '"Android"' },
-              ];
-
-              clickCdp.send('Fetch.continueRequest', {
-                requestId: event.requestId,
-                headers: [
-                  ...Object.entries(req.headers).map(([name, value]) => ({ name, value: String(value) })),
-                  ...overrides,
-                ],
-              }).catch(() => {
-                clickCdp.send('Fetch.continueRequest', { requestId: event.requestId }).catch(() => {});
-              });
-
-              recorded.hintsRewritten = overrides.map((o) => `${o.name}=${o.value}`);
-              return;
-            }
-          });
-
-          clickCdp.on('Network.responseReceived', (event) => {
-            const entry = clickCaptured.find((c) => c.url === event.response.url && c.status === undefined);
-            if (entry) entry.status = event.response.status;
-          });
-
-          page.on('response', (res) => {
-            const entry = clickCaptured.find((c) => c.url === res.url() && c.status === undefined);
-            if (entry) entry.status = res.status();
-          });
-
-          page.on('requestfailed', (req) => {
-            const entry = clickCaptured.find((c) => c.url === req.url() && c.status === undefined && !c.failure);
-            if (entry) entry.failure = req.failure()?.errorText ?? 'failed';
-          });
-
           await page.goto(url, { waitUntil: 'load', timeout: timeoutMs }).catch(() => {});
           await page.waitForTimeout(500);
         }
