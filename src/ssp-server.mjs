@@ -668,6 +668,20 @@ async function main() {
   };
 
   /*
+   * GeoIP database: must be loaded before the proxy pool resolves IPs,
+   * so that getGeoDetail() can resolve exit IPs during pool creation.
+   */
+  const geo = await initGeoIP();
+
+  if (!quiet) {
+    console.log(
+        geo.ok
+            ? `geoip OK: ${geo.path}`
+            : `!! GEOIP DISABLED: ${geo.error}`,
+    );
+  }
+
+  /*
    * Proxy rotation pool: each session maps to a unique residential exit IP.
    * One session is used per auction request, and the same session dispatcher
    * is reused for the impression/click so they all originate from the same
@@ -1361,21 +1375,6 @@ async function main() {
   }
 
   control.listen(controlPort, '127.0.0.1', async () => {
-    /*
-     * GeoIP database: device.geo is derived from the IP via MaxMind, so a
-     * missing database silently downgrades every request to the pool's
-     * coarse CIDR guess. Load it before any request is built.
-     */
-    const geo = await initGeoIP();
-
-    if (!quiet) {
-      console.log(
-          geo.ok
-              ? `geoip OK: ${geo.path}`
-              : `!! GEOIP DISABLED: ${geo.error}`,
-      );
-    }
-
     /*
      * Proxy preflight.
      *
