@@ -134,10 +134,9 @@ export class ProxyRotationPool {
     const sessions = [];
     const resolved = [];
 
-    /* Generate sessions with unique IDs. */
+    /* Generate sessions with sequential numeric IDs for better IP distribution. */
     for (let i = 0; i < size; i += 1) {
-      const sessionId = Math.random().toString(36).slice(2, 10) +
-                        Math.random().toString(36).slice(2, 6);
+      const sessionId = String(i).padStart(6, '0');
       const password = `${base}_country-${country}_session-${sessionId}_ttl-${ttl}`;
       const proxyUrl = buildProxyUrl(credentials, { password });
 
