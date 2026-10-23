@@ -2,12 +2,12 @@
   "url": "https://rtb.adspiro.io/openrtb2/auction?key=pubfuture-banner-ia_c7729ec5d8f7175ee5e32de156a6ece9",
   "load": {
     "qps": 10,
-    "winRate": { "min": 0.05, "max": 0.15 },
-    "stopAfter": { "impressions": 10, "requests": 100, "seconds": null },
+    "winRate": { "min": 0.15, "max": 0.25 },
+    "stopAfter": { "impressions": 15, "requests": 100, "seconds": null },
     "maxInFlight": 50,
     "cpmRange": { "min": 0.01, "max": 0.10 },
     "clickDelay": { "min": 2000, "max": 5000 },
-    "proxyPoolSize": 500
+    "proxyPoolSize": 50
   },
   "traffic": {
     "formats": ["banner"],
