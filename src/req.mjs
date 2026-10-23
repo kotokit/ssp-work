@@ -1660,6 +1660,11 @@ function buildSchain(
      * Nodes come from the selected app's real supply chain when available,
      * so the chain depth and the asi/sid pairs match what the publisher
      * actually sends. Overriding traffic.schain still wins.
+     *
+     * The SSP (PubFuture) is prepended as the first node because it is the
+     * entity selling the inventory to the exchange. The existing chain then
+     * flows through the publisher's intermediaries down to the original
+     * seller.
      */
     const configured =
         traffic?.schain ??
@@ -1673,6 +1678,37 @@ function buildSchain(
         Array.isArray(configured.nodes) &&
         configured.nodes.length > 0
     ) {
+        /*
+         * Prepend the SSP node so the chain reads:
+         *   [SSP → publisher intermediaries → original seller]
+         */
+        const sspNode = {
+            asi: 'pubfuture.com',
+            sid: String(publisherId || '0'),
+            hp: 1,
+
+            ...(requestId
+                ? { rid: requestId }
+                : {}),
+        };
+
+        /*
+         * Attach rid to the last (original seller) node.
+         */
+        const downstreamNodes = configured.nodes.map(
+            (node, index, all) => ({
+                ...node,
+
+                ...(
+                    node.rid === undefined &&
+                    index === all.length - 1 &&
+                    requestId
+                        ? { rid: requestId }
+                        : {}
+                ),
+            }),
+        );
+
         return {
             ver:
                 configured.ver ||
@@ -1683,23 +1719,7 @@ function buildSchain(
                     ? 0
                     : 1,
 
-            /*
-             * Real chains attach a rid to the selling node. Keep any
-             * explicit value, otherwise tie the final node to this auction.
-             */
-            nodes: configured.nodes.map(
-                (node, index, all) => ({
-                    ...node,
-
-                    ...(
-                        node.rid === undefined &&
-                        index === all.length - 1 &&
-                        requestId
-                            ? { rid: requestId }
-                            : {}
-                    ),
-                }),
-            ),
+            nodes: [sspNode, ...downstreamNodes],
         };
     }
 
