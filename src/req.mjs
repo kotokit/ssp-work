@@ -284,7 +284,7 @@ const VIDEO_INTERSTITIAL = {
     mimes: ['video/mp4', 'video/webm'],
 };
 
-const DEFAULT_TMAX = 10000;
+const DEFAULT_TMAX = 500;
 
 const DEFAULT_CURRENCY = 'USD';
 
