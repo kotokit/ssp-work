@@ -7,7 +7,7 @@
     "maxInFlight": 50,
     "cpmRange": { "min": 0.01, "max": 0.10 },
     "clickDelay": { "min": 2000, "max": 5000 },
-    "proxyPoolSize": 100
+    "proxyPoolSize": 500
   },
   "traffic": {
     "formats": ["banner"],
