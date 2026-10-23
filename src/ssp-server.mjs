@@ -436,12 +436,27 @@ async function main() {
         Math.random() * (clickDelayMax - clickDelayMin);
   }
 
-  const format =
-      args.values.get('--format') ??
-      cfg.traffic.formats?.[0] ??
-      'banner';
+  /*
+   * Format selection — rotate through ad formats to vary inventory types.
+   * When --format is not set on the CLI, cycle through banner and video
+   * so requests don't all look identical.
+   */
+  const explicitFormat = args.values.get('--format');
+  const configuredFormat = cfg.traffic.formats?.[0];
 
-  if (!['banner', 'video'].includes(format)) {
+  let formatIndex = 0;
+
+  function nextFormat() {
+    if (explicitFormat) return explicitFormat;
+    if (configuredFormat) return configuredFormat;
+
+    const formats = ['banner', 'video'];
+    const format = formats[formatIndex % formats.length];
+    formatIndex += 1;
+    return format;
+  }
+
+  if (!['banner', 'video'].includes(nextFormat())) {
     throw new Error('--format must be banner or video');
   }
 
@@ -837,7 +852,7 @@ async function main() {
         winRange: [winMin, winMax],
         impTarget,
         reqTarget,
-        format,
+        format: nextFormat(),
         fireImps,
         sellers: sellers.map((seller) => seller.publisherId),
         bundle,
@@ -986,7 +1001,7 @@ async function main() {
         bundle,
         appName,
         publisherId: seller.publisherId,
-        format,
+        format: nextFormat(),
         bidfloor: winnable ? bidFloorWin : bidFloorLose,
         geoMeta: {
           isp: endpoint.isp,

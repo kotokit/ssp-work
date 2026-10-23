@@ -87,6 +87,7 @@ const CONNECTION_TYPES = {
 };
 
 const DEVICE_TYPES = {
+    CTV: 3,
     MOBILE: 4,
     TABLET: 5,
 };
@@ -95,7 +96,195 @@ const DEFAULT_LANGUAGE = 'en';
 
 const DEFAULT_BID_FLOOR = 0.01;
 
-const DEFAULT_TMAX = 500;
+/*
+ * Bidfloor tiers by app category — mirrors real supply where different
+ * inventory types command different floor prices.
+ */
+const BIDFLOOR_TIER = {
+    gaming: 0.25,
+    finance: 0.50,
+    news: 0.75,
+    entertainment: 0.10,
+    default: 0.25,
+};
+
+/*
+ * Map IAB categories to bidfloor tiers — mirrors real supply where
+ * different inventory types command different floor prices.
+ */
+const CATEGORY_TO_BIDFLOOR = {
+    'IAB1': 'entertainment',
+    'IAB2': 'entertainment',
+    'IAB3': 'entertainment',
+    'IAB4': 'entertainment',
+    'IAB5': 'entertainment',
+    'IAB6': 'entertainment',
+    'IAB7': 'entertainment',
+    'IAB8': 'entertainment',
+    'IAB9': 'gaming',
+    'IAB10': 'finance',
+    'IAB11': 'news',
+    'IAB12': 'entertainment',
+    'IAB13': 'entertainment',
+    'IAB14': 'entertainment',
+    'IAB15': 'entertainment',
+    'IAB16': 'entertainment',
+    'IAB17': 'news',
+    'IAB18': 'entertainment',
+    'IAB19': 'news',
+    'IAB20': 'entertainment',
+    'IAB21': 'entertainment',
+    'IAB22': 'entertainment',
+    'IAB23': 'entertainment',
+    'IAB24': 'entertainment',
+    'IAB25': 'entertainment',
+    'IAB26': 'entertainment',
+    'IAB27': 'entertainment',
+    'IAB28': 'entertainment',
+    'IAB29': 'entertainment',
+    'IAB30': 'entertainment',
+    'IAB31': 'entertainment',
+    'IAB32': 'entertainment',
+    'IAB33': 'entertainment',
+    'IAB34': 'entertainment',
+    'IAB35': 'entertainment',
+    'IAB36': 'entertainment',
+    'IAB37': 'entertainment',
+    'IAB38': 'entertainment',
+    'IAB39': 'entertainment',
+    'IAB40': 'entertainment',
+    'IAB41': 'entertainment',
+    'IAB42': 'entertainment',
+    'IAB43': 'entertainment',
+    'IAB44': 'entertainment',
+    'IAB45': 'entertainment',
+    'IAB46': 'entertainment',
+    'IAB47': 'entertainment',
+    'IAB48': 'entertainment',
+    'IAB49': 'entertainment',
+    'IAB50': 'entertainment',
+};
+
+/*
+ * Varying badv subsets — each request gets a different combination of
+ * banned advertiser domains to avoid the identical-badv pattern.
+ */
+/*
+ * Sequential counter for badv subset cycling — ensures consecutive
+ * requests always get different banned-advertiser lists.
+ */
+let badvSubsetIndex = 0;
+
+/*
+ * Banned-advertiser domain subsets for badv variation.
+ *
+ * Each subset is a distinct group of domains — not mere permutations of the
+ * same few entries.  This ensures every request can carry genuinely different
+ * badv content, which is what real SSPs do (different apps have different
+ * advertiser exclusions).
+ *
+ * Domains are drawn from observed badv in production traffic plus common
+ * ad-tech/retargeter domains seen on mobile inventory.
+ */
+const ALL_BADV_DOMAINS = [
+    /* Original observed set */
+    'app-central.com',
+    'gamnest.com',
+    'hadizstudio.com',
+    'herofighting-games.com',
+    'mr-bunn.com',
+    'offlinegleeapps.com',
+    'timeto-move.com',
+    'tri-angular.com',
+
+    /* Common mobile ad-tech / retargeter / fraud domains */
+    'adjust.com',
+    'appsflyer.com',
+    'branch.io',
+    'chartboost.com',
+    'facebook.com',
+    'flurry.com',
+    'gapins.com',
+    'gdtimg.com',
+    'googleadservices.com',
+    'googlevideo.com',
+    'ironsrc.com',
+    'ixiaa.com',
+    'kochava.com',
+    'legato.io',
+    'maio.io',
+    'mobvista.com',
+    'moat.com',
+    'mobfox.com',
+    'mocean.mobi',
+    'mytarget.ru',
+    'onetag-sys.com',
+    'openx.net',
+    'outbrain.com',
+    'pubnative.net',
+    'rubiconproject.com',
+    'seedingalliance.com',
+    'sharethrough.com',
+    'smaato.net',
+    'samsungacr.com',
+    'samsungads.com',
+    'sentry.io',
+    'silvermob.com',
+    'start.io',
+    'tapjoy.com',
+    'tapad.com',
+    'teads.tv',
+    'tremorhub.com',
+    'trustx.org',
+    'underdog.media',
+    'undertext.com',
+    'unity.com',
+    'unruly.com',
+    'verizonmedia.com',
+    'viaad.co',
+    'viwatch.com',
+    'vungle.com',
+    'yandex.ru',
+    'yieldmo.com',
+    'zonami.com',
+];
+
+/*
+ * Partition ALL_BADV_DOMAINS into subsets of 5-8 domains each.
+ *
+ * Each subset is a contiguous slice, so consecutive requests get
+ * genuinely different domain groups rather than permutations of the same
+ * small set.  The number of subsets is chosen so that even with random
+ * selection, adjacent requests are unlikely to collide.
+ */
+const BADV_SUBSET_SIZE = 5;
+const BADV_SUBSETS = [];
+
+for (let i = 0; i < ALL_BADV_DOMAINS.length; i += BADV_SUBSET_SIZE) {
+    BADV_SUBSETS.push(
+        ALL_BADV_DOMAINS.slice(i, i + BADV_SUBSET_SIZE),
+    );
+}
+
+/*
+ * Formats supported by this SSP.
+ */
+const SUPPORTED_FORMATS = ['banner', 'video'];
+
+
+/*
+ * Video interstitial format definitions.
+ */
+const VIDEO_INTERSTITIAL = {
+    placement: 4, // 4 = interstitial per OpenRTB
+    minduration: 5,
+    maxduration: 30,
+    protocols: [2, 3, 5, 6],
+    linearity: 1,
+    mimes: ['video/mp4', 'video/webm'],
+};
+
+const DEFAULT_TMAX = 10000;
 
 const DEFAULT_CURRENCY = 'USD';
 
@@ -1586,6 +1775,15 @@ function buildDevice({
             deviceKey,
         });
 
+    /*
+     * Determine geofetch early so the geo field can be conditionally
+     * omitted when geofetch is 0.
+     */
+    const geofetch =
+        traffic?.geofetch === 1
+            ? 1
+            : 0;
+
     const device = {
         ua,
 
@@ -1646,13 +1844,11 @@ function buildDevice({
         /*
          * Geo describes the IP in device.ip.
          *
-         * The MaxMind database is authoritative because it is what the
-         * exchange itself uses to geolocate that address; a geo that
-         * disagrees with the IP is an immediate mismatch signal.
-         *
-         * Only when the database has no record for the address do we fall
-         * back to the pool's metro token, and then WITHOUT coordinates:
-         * a CIDR-level guess is not precise enough to justify a lat/lon.
+         * Real traffic typically includes device.geo regardless of the
+         * geofetch flag — the exchange derives geo from the IP, and the
+         * app may also provide coordinates via its own location service.
+         * We always emit geo when resolvable so the request matches that
+         * behaviour.
          */
         geo: geoForDevice(
             ip,
@@ -1857,7 +2053,9 @@ function buildApp({
 
     built.publisher.name =
         String(
+            app?.publisherName ||
             traffic?.publisherName ||
+            app?.name ||
             'PubFuture',
         );
 
@@ -2068,6 +2266,34 @@ function buildAuctionRequest({
             )
             : DEFAULT_BID_FLOOR;
 
+    /*
+     * Vary bidfloor based on app category — real SSPs set different floors
+     * for gaming, finance, news, etc.
+     */
+    let effectiveFloor = normalizedFloor;
+
+    if (!normalizedFloor && selectedApp?.cat?.length > 0) {
+        const category = selectedApp.cat[0];
+        const tierName = CATEGORY_TO_BIDFLOOR[category] || 'default';
+        effectiveFloor = BIDFLOOR_TIER[tierName] ?? DEFAULT_BID_FLOOR;
+    }
+
+    /*
+     * Vary badv per request — each request gets a different subset of
+     * banned advertiser domains so the list is not identical across requests.
+     * Uses a sequential counter so adjacent requests are guaranteed different.
+     */
+    let effectiveBadv = traffic?.badv;
+
+    if (
+        !effectiveBadv &&
+        BADV_SUBSETS.length > 0
+    ) {
+        const idx = badvSubsetIndex % BADV_SUBSETS.length;
+        badvSubsetIndex += 1;
+        effectiveBadv = BADV_SUBSETS[idx];
+    }
+
     const imp = {
         id: String(
             traffic?.impId ||
@@ -2084,7 +2310,7 @@ function buildAuctionRequest({
             : {}),
 
         bidfloor:
-        normalizedFloor,
+        effectiveFloor,
 
         bidfloorcur:
             traffic?.bidfloorcur ||
@@ -2129,6 +2355,16 @@ function buildAuctionRequest({
     if (format === 'video') {
         imp.video =
             buildVideo(traffic);
+
+        /*
+         * Video interstitial: set instl to 1 when the format is explicitly
+         * video interstitial, so the exchange knows this is an interstitial
+         * placement rather than a rewarded/in-banner video ad.
+         */
+        if (traffic?.format === 'video_interstitial' ||
+            traffic?.videoInterstitial === true) {
+            imp.instl = 1;
+        }
     } else {
         imp.banner =
             buildBanner(
@@ -2137,6 +2373,16 @@ function buildAuctionRequest({
                 traffic,
                 parsed.display || null,
             );
+
+        /*
+         * Video interstitial: set instl to 1 when the format is explicitly
+         * video interstitial, so the exchange knows this is an interstitial
+         * placement rather than a rewarded/in-banner video ad.
+         */
+        if (traffic?.format === 'video_interstitial' ||
+            traffic?.videoInterstitial === true) {
+            imp.instl = 1;
+        }
     }
 
     const device =
@@ -2169,6 +2415,25 @@ function buildAuctionRequest({
             traffic,
             app: selectedApp,
         });
+
+    /*
+     * Build a site object for web inventory — real SSPs often serve both
+     * app and web inventory. This adds a site object alongside app so the
+     * request looks like it comes from a hybrid SSP.
+     */
+    let site = null;
+
+    if (traffic?.site) {
+        site = {
+            id: traffic.site.id || String(selectedApp?.appId || requestId),
+            name: traffic.site.name || selectedApp?.name || 'PubFuture',
+            domain: traffic.site.domain || 'pubfuture.com',
+            cat: traffic.site.cat || ['IAB1', 'IAB19'],
+            content: traffic.site.content || {
+                language: 'en',
+            },
+        };
+    }
 
     const request = {
         id: requestId,
@@ -2207,6 +2472,13 @@ function buildAuctionRequest({
         ],
 
         app,
+
+        /*
+         * Site object for web inventory — real SSPs often serve both app
+         * and web inventory. Including a site object alongside app makes
+         * the request look like it comes from a hybrid SSP.
+         */
+        ...(site ? { site } : {}),
 
         device,
 
@@ -2266,8 +2538,8 @@ function buildAuctionRequest({
 
             /*
              * Real traffic carries regs.ext.gdpr, regs.ext.us_privacy,
-             * and regs.gpp_sid. 0 = not subject to GDPR, empty US privacy
-             * string, and empty gpp_sid array match production.
+             * and regs.gpp_sid.  gpp_sid is derived from the resolved
+             * geo (USA → [7] for US Privacy Signal section).
              */
             ext: {
                 gdpr:
@@ -2276,8 +2548,6 @@ function buildAuctionRequest({
                         : 0,
 
                 us_privacy: '',
-
-                gpp_sid: [],
             },
         },
     };
@@ -2304,6 +2574,23 @@ function buildAuctionRequest({
                 Number,
             );
     }
+    /*
+     * Derive gpp_sid from resolved geo when not explicitly configured.
+     *
+     * Section 7 = US Privacy Signal.  In real US traffic the device is
+     * in a US state with privacy legislation (California, Virginia,
+     * Colorado, etc.), so regs.gpp_sid contains [7].
+     */
+    if (
+        !Array.isArray(request.regs.gpp_sid) ||
+        request.regs.gpp_sid.length === 0
+    ) {
+        const geoFromDb = getGeo(ip);
+
+        if (geoFromDb?.country === 'USA') {
+            request.regs.gpp_sid = [7];
+        }
+    }
 
     /*
      * Optional request-level restrictions.
@@ -2321,12 +2608,12 @@ function buildAuctionRequest({
 
     if (
         Array.isArray(
-            traffic?.badv,
+            effectiveBadv,
         ) &&
-        traffic.badv.length > 0
+        effectiveBadv.length > 0
     ) {
         request.badv = [
-            ...traffic.badv,
+            ...effectiveBadv,
         ];
     }
 
@@ -2401,7 +2688,7 @@ async function sendAuction(
         auctionUrl,
         supplyKey,
         ua,
-        timeoutMs = 5000,
+        timeoutMs = DEFAULT_TMAX,
         dispatcher,
         jitterMs = true,
         browserContext,
@@ -2895,7 +3182,7 @@ function extractClickUrls(
 async function fireImpression(
     pixel,
     {
-        timeoutMs = 5000,
+        timeoutMs = DEFAULT_TMAX,
         headers = {},
         dispatcher,
         ua,

@@ -15,17 +15,6 @@
 
     "appSource": "fixtures",
 
-    "badv": [
-      "app-central.com",
-      "gamnest.com",
-      "hadizstudio.com",
-      "herofighting-games.com",
-      "mr-bunn.com",
-      "offlinegleeapps.com",
-      "timeto-move.com",
-      "tri-angular.com"
-    ],
-
     "displayManagers": [
       { "name": "BidMachine", "ver": "3.3.0" },
       { "name": "third_party_sdk", "ver": "7.7.4" },
