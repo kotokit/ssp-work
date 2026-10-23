@@ -1082,6 +1082,16 @@ async function main() {
         stats.lastError = `Unexpected HTTP status ${status}`;
       }
 
+      // Log auction response summary (body + outcome)
+      console.log(
+          `RESPONSE seq=${stats.sent} ` +
+          `outcome=${auctionOutcome} ` +
+          `status=${status ?? 'null'} ` +
+          `bidPrice=${json?.seatbid?.[0]?.bid?.[0]?.price ?? '—'} ` +
+          `admLen=${json?.seatbid?.[0]?.bid?.[0]?.adm?.length ?? 0} ` +
+          `responseBody=${JSON.stringify(json ?? result).substring(0, 500)}`,
+      );
+
       if (auctionOutcome === 'bid' && fireImps) {
         let pixels = [];
 
