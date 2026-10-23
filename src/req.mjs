@@ -286,6 +286,16 @@ const VIDEO_INTERSTITIAL = {
 
 const DEFAULT_TMAX = 500;
 
+/*
+ * HTTP request timeout for sendAuction/fireImpression.
+ *
+ * The proxy pool adds ~1.5s of latency per request (CONNECT tunnel + TLS
+ * handshake through residential proxy).  The body tmax (DEFAULT_TMAX) is
+ * what the exchange sees; the HTTP timeout must be higher to avoid
+ * undici timing out before the proxy round-trip completes.
+ */
+const HTTP_TIMEOUT_MS = 10000;
+
 const DEFAULT_CURRENCY = 'USD';
 
 /*
@@ -2688,7 +2698,7 @@ async function sendAuction(
         auctionUrl,
         supplyKey,
         ua,
-        timeoutMs = DEFAULT_TMAX,
+        timeoutMs = HTTP_TIMEOUT_MS,
         dispatcher,
         jitterMs = true,
         browserContext,
@@ -3182,7 +3192,7 @@ function extractClickUrls(
 async function fireImpression(
     pixel,
     {
-        timeoutMs = DEFAULT_TMAX,
+        timeoutMs = HTTP_TIMEOUT_MS,
         headers = {},
         dispatcher,
         ua,
