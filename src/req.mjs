@@ -2582,12 +2582,14 @@ function buildAuctionRequest({
              * on source, not nested under ext.
              */
             schain:
-                buildSchain(
-                    traffic,
-                    publisherId,
-                    requestId,
-                    selectedApp,
-                ),
+                // TODO: re-enable schain once upstream seller IDs match
+                null
+                // buildSchain(
+                //     traffic,
+                //     publisherId,
+                //     requestId,
+                //     selectedApp,
+                // ),
         },
 
         regs: {
