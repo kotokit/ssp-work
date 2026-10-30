@@ -44,6 +44,9 @@ module.exports = {
 
       max_memory_restart: '400M',
 
+      // Always log request bodies so schain/app matching can be verified.
+      args: ['--log-body'],
+
       time: true,
       merge_logs: true,
       out_file: '/var/log/ssp-work/out.log',
