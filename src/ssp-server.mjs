@@ -596,6 +596,27 @@ async function main() {
   }
 
   /* ------------------------------------------------------------------------ */
+  /* App portfolio selection (weighted random over APP_FIXTURES)              */
+  /* ------------------------------------------------------------------------ */
+
+  const appWeight = traffic.apps.reduce(
+      (sum, app) => sum + (app.weight ?? 1),
+      0,
+  );
+
+  function pickApp() {
+    let remaining = Math.random() * appWeight;
+
+    for (const app of traffic.apps) {
+      remaining -= app.weight ?? 1;
+
+      if (remaining < 0) return app;
+    }
+
+    return traffic.apps[traffic.apps.length - 1];
+  }
+
+  /* ------------------------------------------------------------------------ */
   /* Browser + proxy bridge (optional)                                        */
   /* ------------------------------------------------------------------------ */
 
@@ -988,6 +1009,10 @@ async function main() {
       const seller = pickSeller();
       sellerId = seller.publisherId;
 
+      const selectedApp = pickApp();
+      const appBundle = selectedApp.bundle;
+      const appName = selectedApp.name;
+
       const probability =
           winMin + Math.random() * (winMax - winMin);
 
@@ -998,9 +1023,9 @@ async function main() {
       const body = buildAuctionRequest({
         ua,
         ip,
-        bundle,
+        bundle: appBundle,
         appName,
-        publisherId: seller.publisherId,
+        publisherId: selectedApp.publisherId,
         format: nextFormat(),
         bidfloor: winnable ? bidFloorWin : bidFloorLose,
         geoMeta: {
@@ -1186,7 +1211,7 @@ async function main() {
                 androidProfile: true,
                 tlsFacts: {},
                 dispatcher: proxySession?.dispatcher,
-                bundle,
+                bundle: appBundle,
                 headers: {
                   'x-forwarded-for': ip,
                   'x-real-ip': ip,
@@ -1201,7 +1226,7 @@ async function main() {
                     androidProfile: true,
                     tlsFacts: {},
                     dispatcher: proxySession?.dispatcher,
-                    bundle,
+                    bundle: appBundle,
                     headers: {
                       'x-forwarded-for': ip,
                       'x-real-ip': ip,
@@ -1227,7 +1252,7 @@ async function main() {
                     androidProfile: true,
                     tlsFacts: {},
                     dispatcher: proxySession?.dispatcher,
-                    bundle,
+                    bundle: appBundle,
                     headers: {
                       'x-forwarded-for': ip,
                       'x-real-ip': ip,
