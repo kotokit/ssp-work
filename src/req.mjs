@@ -1700,7 +1700,7 @@ function buildSchain(
          */
         const sspNode = {
             asi: 'pubfuture.com',
-            sid: String(publisherId || '0'),
+            sid: String(app?.publisherId || publisherId || '0'),
             hp: 1,
 
             ...(requestId
