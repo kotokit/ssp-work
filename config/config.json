@@ -3,7 +3,7 @@
   "load": {
     "qps": 2,
     "winRate": { "min": 0.5, "max": 0.7 },
-    "stopAfter": { "impressions": 15, "requests": 100, "seconds": null },
+    "stopAfter": { "impressions": 15, "requests": 10000, "seconds": null },
     "maxInFlight": 10,
     "cpmRange": { "min": 0.001, "max": 0.01 },
     "clickDelay": { "min": 2000, "max": 5000 },
