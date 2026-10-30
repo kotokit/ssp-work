@@ -23,6 +23,11 @@
  *   weight      relative share of traffic
  *   schain      supply chain nodes for this publisher
  *               (asi/sid/hp; rid is filled in per request)
+ *
+ * NOTE — Screencore priorityInventory apps: com.Partyup.GolfRoyale,
+ * risk.city.dominations.strategy.io.games, com.muscle.rush, etc.
+ * PubFuture traffic MUST include these bundles to match Screencore
+ * priority routing and get routed to DSPs instead of returning 204.
  */
 
 /**
@@ -170,6 +175,47 @@ export const APP_FIXTURES = [
     keywords: 'Flash Fists Launcher Plus,Gaming',
     weight: 6,
     schain: BIDMACHINE_NODES,
+  },
+
+  // === Screencore priorityInventory apps (must match to win bids) ===
+  {
+    bundle: 'com.Partyup.GolfRoyale',
+    appId: 'edc8cc45b16e',
+    name: 'Golf Guys',
+    domain: 'golfguys.io',
+    ver: '1.0.0',
+    publisherName: 'Golf Guys',
+    publisherId: '127',
+    cat: ['IAB1', 'IAB9', 'IAB9-30'],
+    keywords: 'Golf,Golf Royale,Game',
+    weight: 30,
+    schain: [{ asi: 'pubfuture.com', sid: '127', hp: 1 }],
+  },
+  {
+    bundle: 'com.muscle.rush',
+    appId: 'e99c0f8e27a1',
+    name: 'Muscle Rush - Smash Running',
+    domain: 'musclerush.com',
+    ver: '2.5.0',
+    publisherName: 'Muscle Rush',
+    publisherId: '415',
+    cat: ['IAB1', 'IAB9', 'IAB9-30'],
+    keywords: 'Muscle Rush,Running,Game',
+    weight: 25,
+    schain: [{ asi: 'pubfuture.com', sid: '415', hp: 1 }],
+  },
+  {
+    bundle: 'risk.city.dominations.strategy.io.games',
+    appId: '5ffb4b4a99ec',
+    name: 'Space Takeover: Space Games',
+    domain: 'spacetakeover.io',
+    ver: '3.1.0',
+    publisherName: 'Space Takeover',
+    publisherId: '222',
+    cat: ['IAB1', 'IAB9', 'IAB9-30'],
+    keywords: 'Space,Strategy,Games',
+    weight: 25,
+    schain: [{ asi: 'pubfuture.com', sid: '222', hp: 1 }],
   },
 ];
 
