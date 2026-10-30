@@ -185,6 +185,7 @@ export function buildImpressionHeaders({
   language = 'en-US',
   referer,
   major,
+  bundle,
 } = {}) {
   const chromeMajor = major ?? parseChromeMajor(ua);
   const webview = isWebView(ua);
@@ -237,6 +238,15 @@ export function buildImpressionHeaders({
   headers.push(['sec-fetch-site', 'cross-site']);
   headers.push(['sec-fetch-mode', 'no-cors']);
   headers.push(['sec-fetch-dest', 'image']);
+
+  /*
+   * x-requested-with is emitted by Android WebView and matches the app
+   * bundle so the exchange can tie the impression back to the auction.
+   */
+  if (bundle && webview) {
+    headers.push(['x-requested-with', bundle]);
+  }
+
   headers.push(['accept-encoding', acceptEncodingFor(chromeMajor)]);
   headers.push(['accept-language', language]);
 

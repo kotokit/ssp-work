@@ -388,7 +388,7 @@ async function main() {
 
   const cpmRange =
       cfg.load?.cpmRange ??
-      { min: 0.01, max: 0.10 };
+      { min: 0.01, max: 1.12 };
 
   const bidFloorWin = Number(
       cpmRange.min ?? 0.01,
@@ -1186,6 +1186,7 @@ async function main() {
                 androidProfile: true,
                 tlsFacts: {},
                 dispatcher: proxySession?.dispatcher,
+                bundle,
                 headers: {
                   'x-forwarded-for': ip,
                   'x-real-ip': ip,
@@ -1200,6 +1201,7 @@ async function main() {
                     androidProfile: true,
                     tlsFacts: {},
                     dispatcher: proxySession?.dispatcher,
+                    bundle,
                     headers: {
                       'x-forwarded-for': ip,
                       'x-real-ip': ip,
@@ -1225,6 +1227,7 @@ async function main() {
                     androidProfile: true,
                     tlsFacts: {},
                     dispatcher: proxySession?.dispatcher,
+                    bundle,
                     headers: {
                       'x-forwarded-for': ip,
                       'x-real-ip': ip,

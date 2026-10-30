@@ -504,6 +504,7 @@ async function main() {
           ua,
           androidProfile: true,
           dispatcher: local ? undefined : session.dispatcher,
+          bundle: body.app.bundle,
           headers: {
             'x-forwarded-for': session.ip,
           },
@@ -516,6 +517,7 @@ async function main() {
               ua,
               androidProfile: true,
               dispatcher: local ? undefined : session.dispatcher,
+              bundle: body.app.bundle,
               headers: {
                 'x-forwarded-for': session.ip,
               },
@@ -536,6 +538,7 @@ async function main() {
               ua,
               androidProfile: true,
               dispatcher: local ? undefined : session.dispatcher,
+              bundle: body.app.bundle,
               headers: {
                 'x-forwarded-for': session.ip,
               },

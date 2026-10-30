@@ -92,6 +92,13 @@ const DEVICE_TYPES = {
     TABLET: 5,
 };
 
+const NON_UUID_IFA_TYPES = [
+    'sspid',
+    'ppid',
+    'sessionid',
+    'dpid',
+];
+
 const DEFAULT_LANGUAGE = 'en';
 
 const DEFAULT_BID_FLOOR = 0.01;
@@ -1451,6 +1458,7 @@ function buildSyntheticIFA({
                                publisherId,
                                model,
                                deviceKey,
+                               ifaType,
                            }) {
     /*
      * Stable identifier for a QA fixture.
@@ -1471,6 +1479,14 @@ function buildSyntheticIFA({
             .createHash('sha256')
             .update(seed)
             .digest('hex');
+
+    /*
+     * If ifaType is specified and non-UUID, return a hex-format ID
+     * (e.g. the corpus r7 pattern: 5f1c2a9be4d70c3a with ifa_type: 'sspid').
+     */
+    if (ifaType && NON_UUID_IFA_TYPES.includes(ifaType)) {
+        return hash.slice(0, 16);
+    }
 
     /*
      * UUID v4-looking synthetic identifier.
@@ -1803,6 +1819,7 @@ function buildDevice({
             publisherId,
             model: parsed.model,
             deviceKey,
+            ifaType: traffic?.ifaType,
         });
 
     /*
@@ -1964,13 +1981,31 @@ function buildDevice({
     /*
      * device.ext is OMITTED by default.
      *
-     * Real traffic from this exchange carries no device.ext at all. The QA
-     * block that used to live here (synthetic/webview/knownModel/androidBuild)
-     * was a clear test marker, so it is only emitted when explicitly
-     * requested via traffic.qaExt === true.
+     * Real traffic from this exchange carries no device.ext at all — except
+     * when the IFA is non-UUID (e.g. an SSP-made hex string). In that case
+     * the corpus emits device.ext.ifa_type so the exchange knows how to
+     * interpret the opaque identifier.
+     *
+     * The QA block (synthetic/webview/knownModel/androidBuild) was a clear
+     * test marker, so it is only emitted when explicitly requested via
+     * traffic.qaExt === true.
      */
+
+    const isUuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(String(ifa));
+
+    if (!isUuid) {
+        const ifaType =
+            traffic?.ifaType ||
+            NON_UUID_IFA_TYPES[0];
+
+        device.ext = {
+            ifa_type: ifaType,
+        };
+    }
+
     if (traffic?.qaExt === true) {
         device.ext = {
+            ...device.ext,
             qa: {
                 synthetic: true,
                 browser: parsed.browser.type,
@@ -2543,21 +2578,16 @@ function buildAuctionRequest({
             tid: requestId,
 
             /*
-             * SupplyChain lives at source.ext.schain.
-             *
-             * This was previously emitted at source.schain, which is not
-             * where OpenRTB defines it — the reference traffic confirms the
-             * nested location.
+             * SupplyChain lives at source.schain — the top-level property
+             * on source, not nested under ext.
              */
-            ext: {
-                schain:
-                    buildSchain(
-                        traffic,
-                        publisherId,
-                        requestId,
-                        selectedApp,
-                    ),
-            },
+            schain:
+                buildSchain(
+                    traffic,
+                    publisherId,
+                    requestId,
+                    selectedApp,
+                ),
         },
 
         regs: {
@@ -3220,6 +3250,7 @@ async function fireImpression(
         referer,
         androidProfile = false,
         tlsFacts,
+        bundle,
     } = {},
 ) {
     if (!pixel) {
@@ -3275,6 +3306,7 @@ async function fireImpression(
                     ua: deviceUa,
                     language,
                     referer,
+                    bundle,
                 });
 
             /*
