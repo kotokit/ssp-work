@@ -24,7 +24,7 @@ module.exports = {
       name: 'ssp-work',
       script: './run.sh',
       interpreter: 'bash',
-      cwd: '/opt/ssp-work',
+      cwd: '/root/ssp-work',
 
       // A finished run is a finished run; restart is an explicit operator action.
       autorestart: false,
