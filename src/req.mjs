@@ -2246,6 +2246,7 @@ function buildAuctionRequest({
                                  bundle,
                                  appName,
                                  publisherId,
+                                 selectedApp,
                                  format = 'banner',
                                  bidfloor = DEFAULT_BID_FLOOR,
                                  geoMeta = {},
@@ -2461,16 +2462,10 @@ function buildAuctionRequest({
         });
 
     /*
-     * Select the app for this request.
-     *
-     * Real traffic spreads across a publisher's app portfolio, weighted by
-     * how much inventory each app actually serves. A single fixed app on
-     * every request is itself a pattern worth avoiding.
+     * selectedApp is passed from the caller (ssp-server.mjs) so that the
+     * same fixture drives the publisherId, the app object, and the schain
+     * — avoiding the two independent pickApp() calls that caused mismatches.
      */
-    const selectedApp =
-        traffic?.apps?.length
-            ? pickWeightedApp(traffic.apps)
-            : null;
 
     const app =
         buildApp({

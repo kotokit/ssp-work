@@ -1026,6 +1026,7 @@ async function main() {
         bundle: appBundle,
         appName,
         publisherId: selectedApp.publisherId,
+        selectedApp,
         format: nextFormat(),
         bidfloor: winnable ? bidFloorWin : bidFloorLose,
         geoMeta: {
