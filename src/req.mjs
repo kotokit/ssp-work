@@ -2576,13 +2576,14 @@ function buildAuctionRequest({
              * SupplyChain lives at source.schain — the top-level property
              * on source, not nested under ext.
              */
-            schain:
-                buildSchain(
-                    traffic,
-                    publisherId,
-                    requestId,
-                    selectedApp,
-                ),
+            // schain:
+            //     buildSchain(
+            //         traffic,
+            //         publisherId,
+            //         requestId,
+            //         selectedApp,
+            //     ),
+            schain: null,
         },
 
         regs: {
