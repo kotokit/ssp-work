@@ -1,5 +1,5 @@
 {
-  "url": "https://rtb.adspiro.io/openrtb2/auction?key=pubfuture-banner-ia_c7729ec5d8f7175ee5e32de156a6ece9",
+  "url": "https://h1.screencore.io/?kp=jM5hb12HPlt8vq2eMSEG&kn=adspiro_banner_ia",
   "load": {
     "qps": 2,
     "winRate": { "min": 0.5, "max": 0.7 },

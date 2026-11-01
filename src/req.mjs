@@ -1699,7 +1699,7 @@ function buildSchain(
          *   [SSP → publisher intermediaries → original seller]
          */
         const sspNode = {
-            asi: 'pubfuture.com',
+            asi: 'screencore.io',
             sid: String(app?.publisherId || publisherId || '0'),
             hp: 1,
 
@@ -1757,7 +1757,7 @@ function buildSchain(
                 asi:
                     traffic?.asi ||
                     app?.domain ||
-                    'pubfuture.com',
+                    'screencore.io',
 
                 sid: String(
                     traffic?.sid ||
@@ -2121,14 +2121,14 @@ function buildApp({
             app?.publisherName ||
             traffic?.publisherName ||
             app?.name ||
-            'PubFuture',
+            'Screencore',
         );
 
     if (traffic?.publisherDomain) {
         built.publisher.domain =
             String(traffic.publisherDomain);
     } else {
-        built.publisher.domain = 'pubfuture.com';
+        built.publisher.domain = 'screencore.io';
     }
 
     return built;
@@ -2583,7 +2583,7 @@ function buildAuctionRequest({
             //         requestId,
             //         selectedApp,
             //     ),
-            schain: null,
+
         },
 
         regs: {
