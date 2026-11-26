@@ -5,7 +5,7 @@
     "winRate": { "min": 0.5, "max": 0.7 },
     "stopAfter": { "impressions": null, "requests": null, "seconds": null },
     "maxInFlight": 50,
-    "cpmRange": { "min": 0.25, "max": 1.50 },
+    "cpmRange": { "min": 0.01, "max": 0.01 },
     "clickDelay": { "min": 2000, "max": 5000 },
     "proxyPoolSize": 20,
     "proxyCountry": "US",
