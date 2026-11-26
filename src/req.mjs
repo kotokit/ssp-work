@@ -1714,7 +1714,7 @@ function buildSchain(
          * prepending would duplicate it — skip the prepend in that case.
          */
         const sspNode = {
-            asi: 'screencore.io',
+            asi: 'pubfuture.com',
             sid: String(app?.publisherId || publisherId || '0'),
             hp: 1,
 
@@ -1780,7 +1780,7 @@ function buildSchain(
                 asi:
                     traffic?.asi ||
                     app?.domain ||
-                    'screencore.io',
+                    'pubfuture.com',
 
                 sid: String(
                     traffic?.sid ||
@@ -2151,7 +2151,7 @@ function buildApp({
         built.publisher.domain =
             String(traffic.publisherDomain);
     } else {
-        built.publisher.domain = 'screencore.io';
+        built.publisher.domain = 'pubfuture.com';
     }
 
     return built;
@@ -2519,18 +2519,22 @@ function buildAuctionRequest({
     }
 
     /*
-     * SupplyChain. The exchange's own captured traffic carries it at
-     * source.ext.schain, so that is the default; set
-     * traffic.schainLocation = 'source' to use the spec position
-     * (source.schain) instead.
+     * SupplyChain. OFF by default: unless traffic.schain === true the
+     * request is sent without schain, matching the reference traffic
+     * that does not carry it. When enabled, the default location is
+     * source.ext.schain (where the exchange's own captured traffic
+     * carries it); traffic.schainLocation = 'source' uses the spec
+     * position (source.schain) instead.
      */
     const schain =
-        buildSchain(
-            traffic,
-            publisherId,
-            requestId,
-            selectedApp,
-        );
+        traffic?.schain === true
+            ? buildSchain(
+                traffic,
+                publisherId,
+                requestId,
+                selectedApp,
+            )
+            : null;
 
     const request = {
         id: requestId,
@@ -2610,14 +2614,18 @@ function buildAuctionRequest({
             tid: requestId,
 
             /*
-             * SupplyChain. Default location is source.ext.schain — where
-             * the exchange's own traffic carries it. traffic.schainLocation
+             * SupplyChain — only present when traffic.schain === true.
+             * Default location is source.ext.schain; traffic.schainLocation
              * = 'source' moves it to the spec position source.schain.
              */
             ...(
-                traffic?.schainLocation === 'source'
-                    ? { schain }
-                    : { ext: { schain } }
+                schain
+                    ? (
+                        traffic?.schainLocation === 'source'
+                            ? { schain }
+                            : { ext: { schain } }
+                    )
+                    : {}
             ),
 
         },

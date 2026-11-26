@@ -58,14 +58,15 @@ import { getGeoDetail } from './geo.mjs';
 export function buildTlsConfig() {
   return {
     /*
-     * Chrome Android cipher suites (TLS 1.3 only, in Chrome's order).
-     * These are the cipher suites Chrome advertises in its ClientHello.
+     * NOTE: no `ciphers` option. Node's `ciphers` only sets the TLS <= 1.2
+     * list; the old code put TLS 1.3 suite names there, which left the
+     * TLS 1.2 list EMPTY. Servers that negotiate 1.2 (or validate the
+     * ClientHello strictly) then reject the handshake with
+     * "tlsv1 alert protocol version" (alert 70) — verified live against
+     * h1.screencore.io. OpenSSL's default 1.2 list (ECDHE+GCM first) is a
+     * solid, browser-like set; the TLS 1.3 suites are always offered by
+     * OpenSSL in a fixed order regardless of this option.
      */
-    ciphers: [
-      'TLS_AES_128_GCM_SHA256',
-      'TLS_AES_256_GCM_SHA384',
-      'TLS_CHACHA20_POLY1305_SHA256',
-    ].join(':'),
 
     /*
      * Signature algorithms Chrome advertises in signature_algorithms.

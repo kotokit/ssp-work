@@ -1,5 +1,5 @@
 {
-  "url": "https://h1.screencore.io/?kp=jM5hb12HPlt8vq2eMSEG&kn=adspiro_banner_ia",
+  "url": "https://rtb.adspiro.io/openrtb2/auction?key=pubfuture-banner-ia_c7729ec5d8f7175ee5e32de156a6ece9",
   "load": {
     "qps": 5,
     "winRate": { "min": 0.5, "max": 0.7 },
@@ -17,6 +17,8 @@
     "fireImpressions": true,
 
     "appSource": "fixtures",
+
+    "schain": false,
 
     "displayManagers": [
       { "name": "BidMachine", "ver": "3.3.0" },
