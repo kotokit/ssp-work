@@ -19,8 +19,8 @@
 
 import { ProxyAgent } from 'undici';
 import { getProxyCredentials } from './pr.mjs';
-import { buildTlsConfig } from './us-session.mjs';
-import { getGeoDetail } from './geo.mjs';
+import { buildTlsConfig, buildTargetTls } from './us-session.mjs';
+import { initGeoIP, getGeoDetail } from './geo.mjs';
 
 const IP_ECHO = 'https://ipv4.icanhazip.com';
 
@@ -36,6 +36,7 @@ async function resolveSession(session, { attempts = 4, timeoutMs = 15_000 } = {}
       connections: 1,
       pipelining: 1,
       tls: buildTlsConfig(),
+      requestTls: buildTargetTls(),
     });
 
     try {
@@ -126,6 +127,12 @@ export class ProxyRotationPool {
     }
 
     /*
+     * Exit IPs are geolocated with the local GeoLite2 database during
+     * resolution; make sure it is loaded no matter who calls create().
+     */
+    await initGeoIP();
+
+    /*
      * Derive the BASE password — strip any _country-XX_ session-XX_ttl-XX
      * suffix so we can mint new sessions from it.
      */
@@ -148,6 +155,9 @@ export class ProxyRotationPool {
         ip: null,
         country: null,
         city: null,
+        region: null,
+        metro: null,
+        zip: null,
         resolved: false,
       });
     }
@@ -171,6 +181,9 @@ export class ProxyRotationPool {
           session.ip = result.value.ip;
           session.country = result.value.country;
           session.city = result.value.city;
+          session.region = result.value.region ?? null;
+          session.metro = result.value.metro ?? null;
+          session.zip = result.value.zip ?? null;
           session.resolved = true;
           resolved.push(session);
           console.log(
@@ -194,6 +207,7 @@ export class ProxyRotationPool {
         connections: 1,
         pipelining: 1,
         tls: buildTlsConfig(),
+        requestTls: buildTargetTls(),
       });
     }
 

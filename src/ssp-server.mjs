@@ -266,6 +266,31 @@ function createLatencyTracker(limit = LATENCY_SAMPLE_LIMIT) {
   };
 }
 
+/**
+ * Parse a Retry-After header value (delta-seconds or HTTP-date) into
+ * milliseconds, capped so one slow peer cannot stall the pipeline.
+ * Returns null when the header is absent or unparseable.
+ */
+function parseRetryAfter(value) {
+  if (value === undefined || value === null || value === '') {
+    return null;
+  }
+
+  const seconds = Number(value);
+
+  if (Number.isFinite(seconds) && seconds >= 0) {
+    return Math.min(seconds * 1000, 15_000);
+  }
+
+  const date = Date.parse(value);
+
+  if (!Number.isNaN(date)) {
+    return Math.min(Math.max(date - Date.now(), 0), 15_000);
+  }
+
+  return null;
+}
+
 function redactUrl(value) {
   try {
     const url = new URL(value);
@@ -474,11 +499,27 @@ async function main() {
   const diurnalMode = cfg.load?.diurnal ?? 'flat';
 
   /**
+   * Whole local hour (0-23) in the given IANA time zone.
+   *
+   * Uses the ICU zone data, so DST transitions are handled correctly
+   * (US Eastern is UTC-4 in summer, UTC-5 in winter).
+   */
+  function hourInTimezone(timeZone, now) {
+    return Number(
+        new Intl.DateTimeFormat('en-US', {
+            timeZone,
+            hour: '2-digit',
+            hourCycle: 'h23',
+        }).format(now),
+    );
+  }
+
+  /**
    * Diurnal multiplier for the base QPS.
    *
    * 'flat' returns 1 at all times.
    * 'us-eastern' applies a daytime-peak curve based on US Eastern time,
-   *   peaking around 14:00–18:00 ET and dipping to ~0.2 at 04:00–06:00 ET.
+   *   peaking around 14:00–18:00 ET and dipping to ~0.15 at 04:00–06:00 ET.
    * 'us-central' applies the same shape shifted to US Central time.
    * A numeric value (0..1) overrides the curve for the entire run.
    */
@@ -487,21 +528,23 @@ async function main() {
       return diurnalMode;
     }
 
-    const utcHour = now.getUTCHours() + now.getTimezoneOffset() / 60;
-
+    /*
+     * The old code did getUTCHours() + getTimezoneOffset()/60 + 4:
+     * the offset was applied twice (getUTCHours is already UTC) and the
+     * sign was wrong, so "us-eastern" actually tracked UTC+4 (Dubai) with
+     * the peak and trough swapped.
+     */
     const hours = {
-      'us-eastern': utcHour + 4,
-      'us-central': utcHour + 5,
-    }[diurnalMode] ?? utcHour;
-
-    const h = ((hours % 24) + 24) % 24;
+      'us-eastern': hourInTimezone('America/New_York', now),
+      'us-central': hourInTimezone('America/Chicago', now),
+    }[diurnalMode] ?? now.getUTCHours();
 
     /*
      * Smooth sinusoidal curve: peak at 16:00 local, trough at 04:00 local.
      * Range is [0.15, 1.0].
      */
-    const phase = ((h - 4) / 24) * 2 * Math.PI;
-    return 0.625 + 0.375 * Math.cos(phase);
+    const phase = ((hours - 16) / 24) * 2 * Math.PI;
+    return 0.575 + 0.425 * Math.cos(phase);
   }
 
   const effectiveQps = () => Math.max(1, Math.round(qps * diurnalMultiplier()));
@@ -650,7 +693,16 @@ async function main() {
     );
   }
 
-  let urlKey = parsedAuctionUrl.searchParams.get('key') ?? '';
+  /*
+   * The supply key can ride in the URL under different parameter names
+   * depending on the endpoint: adspiro uses ?key=..., screencore uses
+   * ?kp=.... When the URL carries it, the x-supply-key header is omitted
+   * (the URL is the auth); otherwise the environment key is used.
+   */
+  let urlKey =
+      parsedAuctionUrl.searchParams.get('key') ??
+      parsedAuctionUrl.searchParams.get('kp') ??
+      '';
 
   const envKey =
       process.env[cfg.supplyKeyEnv ?? 'SSP_SUPPLY_KEY'] ?? '';
@@ -772,6 +824,56 @@ async function main() {
 
   const auctionLatency = createLatencyTracker();
   const impressionLatency = createLatencyTracker();
+
+  /*
+   * Circuit breaker.
+   *
+   * When the proxy or the exchange starts failing in a burst (503 exit
+   * nodes, 429 rate limits, stalled tunnels), launching more requests
+   * only makes it worse. A rolling window of the last 20 auction
+   * outcomes opens the breaker when at least half are hard errors;
+   * launches pause for a cooldown, then resume.
+   */
+  const breakerWindow = [];
+  const BREAKER_SAMPLE = 20;
+  const BREAKER_THRESHOLD = 0.5;
+  const BREAKER_COOLDOWN_MS = 10_000;
+  let breakerOpenUntil = 0;
+
+  function recordAuctionOutcome(hardError) {
+    breakerWindow.push(hardError ? 1 : 0);
+
+    if (breakerWindow.length > BREAKER_SAMPLE) {
+      breakerWindow.shift();
+    }
+  }
+
+  function breakerPaused(now = performance.now()) {
+    if (now < breakerOpenUntil) return true;
+
+    if (breakerWindow.length < BREAKER_SAMPLE) return false;
+
+    const failures = breakerWindow.reduce(
+        (sum, value) => sum + value,
+        0,
+    );
+
+    if (failures / breakerWindow.length >= BREAKER_THRESHOLD) {
+      breakerOpenUntil = now + BREAKER_COOLDOWN_MS;
+
+      if (!quiet) {
+        console.log(
+            `circuit breaker open: ${failures}/${breakerWindow.length} ` +
+            `recent hard errors — pausing launches for ` +
+            `${BREAKER_COOLDOWN_MS / 1000}s`,
+        );
+      }
+
+      return true;
+    }
+
+    return false;
+  }
 
   let inFlight = 0;
   let stopping = false;
@@ -995,14 +1097,34 @@ async function main() {
       }
 
       /*
-       * One pool entry supplies the IP, the ISP and the metro.
+       * The body IP must be the IP the request actually leaves from.
        *
-       * They must come from the SAME entry: the exchange derives geo from
-       * the IP it sees, so an IP from Dallas paired with a Boston metro is
-       * a mismatch. No network call is needed here, which keeps the launch
-       * path free of subprocesses and per-request lookups.
+       * With a proxy pool that is the session's resolved exit IP: the
+       * exchange geolocates the source IP it sees, so device.ip must
+       * match it or every request is a geo/IP mismatch. Geo is derived
+       * from that IP via GeoLite2 inside buildDevice(); the metro from
+       * the session is only a fallback when the DB has no record.
+       *
+       * Carrier is deliberately omitted for proxy sessions (isp: null):
+       * we do not know the exit IP's ISP, and claiming a fake pool ISP
+       * (e.g. "Comcast Cable" on an AT&T exit) is a false statement the
+       * exchange can cross-check. No carrier + connectiontype wifi is
+       * internally consistent.
+       *
+       * Without a pool (direct connection) fall back to the fake IP
+       * pool: one entry supplies the IP, the ISP and the metro, and
+       * they must come from the SAME entry (a Dallas IP paired with a
+       * Boston metro is a mismatch). No network call is needed here,
+       * which keeps the launch path free of subprocesses and per-request
+       * lookups.
        */
-      const endpoint = randEndpoint();
+      const endpoint = proxySession?.ip
+          ? {
+              ip: proxySession.ip,
+              isp: null,
+              metro: proxySession.metro ?? null,
+            }
+          : randEndpoint();
 
       const ip = endpoint.ip;
 
@@ -1069,21 +1191,58 @@ async function main() {
         }
       }
 
-      const auctionStarted = performance.now();
+      /*
+       * Retry transient auction failures with backoff + jitter: network
+       * errors (stalled proxy tunnels), 429 (exchange rate limit) and
+       * 5xx (exchange/proxy hiccup) are all retryable. Honoring
+       * Retry-After keeps us polite to the rate limiter.
+       *
+       * Each physical attempt is sampled in the latency tracker; the
+       * stats below count the LOGICAL request once.
+       */
+      const MAX_AUCTION_ATTEMPTS = 3;
 
       let result;
 
-      try {
-        result = await sendAuction(body, {
-          auctionUrl,
-          supplyKey,
-          ua,
-          browserContext: shooter ?? undefined,
-          dispatcher: proxySession?.dispatcher,
-        });
-      } finally {
-        auctionLatency.add(
-            performance.now() - auctionStarted,
+      for (let auctionAttempt = 1; ; auctionAttempt += 1) {
+        const auctionStarted = performance.now();
+
+        try {
+          result = await sendAuction(body, {
+            auctionUrl,
+            supplyKey,
+            ua,
+            browserContext: shooter ?? undefined,
+            dispatcher: proxySession?.dispatcher,
+          });
+        } finally {
+          auctionLatency.add(
+              performance.now() - auctionStarted,
+          );
+        }
+
+        const status = result?.status;
+
+        const retryable =
+            status === 0 ||
+            status === 429 ||
+            (status >= 500 && status < 600);
+
+        if (!retryable || auctionAttempt >= MAX_AUCTION_ATTEMPTS) {
+          break;
+        }
+
+        const retryAfterMs =
+            parseRetryAfter(result?.headers?.['retry-after']);
+
+        const baseMs =
+            retryAfterMs ?? (status === 429 ? 1500 : 750);
+
+        const backoffMs =
+            baseMs * auctionAttempt * (0.5 + Math.random());
+
+        await new Promise(
+            (resolve) => setTimeout(resolve, backoffMs),
         );
       }
 
@@ -1094,6 +1253,14 @@ async function main() {
       const json = result?.json;
 
       auctionOutcome = classifyAuctionResponse(status, json);
+
+      recordAuctionOutcome(
+          auctionOutcome === 'network-error' ||
+          auctionOutcome === 'http-4xx' ||
+          auctionOutcome === 'http-5xx' ||
+          auctionOutcome === 'malformed' ||
+          auctionOutcome === 'unexpected-status',
+      );
 
       if (auctionOutcome === 'network-error') {
         stats.lastError = result?.error ?? 'Network error';
@@ -1342,6 +1509,16 @@ async function main() {
     }
 
     const now = performance.now();
+
+    /*
+     * Breaker open: let the proxy/exchange recover instead of feeding
+     * it more requests. Re-check shortly.
+     */
+    if (breakerPaused(now)) {
+      nextDue = now + 500;
+      scheduleNext();
+      return;
+    }
 
     if (inFlight < maxInFlight && now >= nextDue) {
       const currentQps = effectiveQps();

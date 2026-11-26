@@ -39,20 +39,21 @@ import { getProxyCredentials } from './pr.mjs';
 import { getGeoDetail } from './geo.mjs';
 
 /**
- * TLS configuration that matches Chrome Android's ClientHello.
+ * TLS configuration that approximates Chrome Android's ClientHello.
  *
- * This tunes undici's TLS settings so the TCP-level fingerprint
- * (JA3/JA4) of the auction and pixel requests is indistinguishable
- * from a real Android WebView making the same request.
+ * This tunes Node's TLS settings so the TLS-level fingerprint of the
+ * auction and pixel requests is as close to a real Android WebView as
+ * undici allows: same signature_algorithms, same key_share groups,
+ * same supported versions, cert compression on.
  *
- * Key parameters:
- *   - ciphers: Chrome Android's cipher suite order
- *   - sigalgs: signature algorithms Chrome advertises
- *   - keyShareGroups: x25519 + secp256r1 (Chrome's key_share)
- *   - supportedVersion: TLS 1.3 only (Chrome drops 1.2 on Android)
- *   - compressCertificates: true (Chrome compresses cert chains)
+ * Honest limits (Node cannot express these without a custom TLS stack):
+ *   - TLS 1.3 cipher order is fixed by OpenSSL (AES_256 first), while
+ *     Chrome offers AES_128 first — so JA3 ciphers differ.
+ *   - The extension set is Node's, not Chrome's ~35-extension set.
  *
- * See: https://crypto.stackexchange.com/a/97183 (JA3 methodology)
+ * Those two gaps are only fully closed by the --browser path (real
+ * Chromium). Everything else here still matters: servers and IVT
+ * filters read sigalgs, groups, versions and ALPN, not just ciphers.
  */
 export function buildTlsConfig() {
   return {
@@ -91,15 +92,38 @@ export function buildTlsConfig() {
     ],
 
     /*
-     * Supported versions Chrome advertises.
-     * Chrome Android sends TLS 1.3 + 1.2 in supported_versions.
+     * Supported versions Chrome advertises (TLS 1.3 + 1.2).
+     * Node's tls.connect() takes minVersion/maxVersion — the old
+     * `supportedVersion` key was not a Node option and was silently
+     * ignored.
      */
-    supportedVersion: ['TLS1_3', 'TLS1_2'],
+    minVersion: 'TLSv1.2',
+    maxVersion: 'TLSv1.3',
 
     /*
      * Compress certificates — Chrome enables cert compression (RFC 8879).
      */
     compressCertificates: true,
+  };
+}
+
+/**
+ * TLS options for the TUNNELLED (target) leg of a ProxyAgent.
+ *
+ * undici's ProxyAgent applies `requestTls` to the connection it opens to
+ * the target host after the CONNECT tunnel — that is the connection the
+ * auction/pixel actually rides on. The plain `tls` option only reaches
+ * the target leg for non-tunnelled (http) requests, so passing `tls`
+ * alone leaves the https auction leg on Node's default TLS.
+ *
+ * `preferH2` flips the ALPN offer to ['h2', 'http/1.1'] — Chrome's
+ * order — instead of undici's default ['http/1.1', 'h2'].
+ */
+export function buildTargetTls() {
+  return {
+    ...buildTlsConfig(),
+    allowH2: true,
+    preferH2: true,
   };
 }
 
@@ -259,6 +283,7 @@ export async function openUsSession({
       connections: 1,
       pipelining: 1,
       tls: buildTlsConfig(),
+      requestTls: buildTargetTls(),
     });
 
     try {
@@ -347,6 +372,7 @@ export async function openUsSession({
       connections: 1,
       pipelining: 1,
       tls: buildTlsConfig(),
+      requestTls: buildTargetTls(),
     });
 
     live.add(agent);
@@ -511,6 +537,7 @@ export async function openPooledSession(entry, {
     connections: 1,
     pipelining: 1,
     tls: buildTlsConfig(),
+    requestTls: buildTargetTls(),
   });
 
   try {

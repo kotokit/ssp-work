@@ -1,13 +1,16 @@
 {
   "url": "https://h1.screencore.io/?kp=jM5hb12HPlt8vq2eMSEG&kn=adspiro_banner_ia",
   "load": {
-    "qps": 2,
+    "qps": 5,
     "winRate": { "min": 0.5, "max": 0.7 },
-    "stopAfter": { "impressions": 15, "requests": 10000, "seconds": null },
-    "maxInFlight": 10,
-    "cpmRange": { "min": 0.001, "max": 0.01 },
+    "stopAfter": { "impressions": null, "requests": null, "seconds": null },
+    "maxInFlight": 50,
+    "cpmRange": { "min": 0.25, "max": 1.50 },
     "clickDelay": { "min": 2000, "max": 5000 },
-    "proxyPoolSize": 50
+    "proxyPoolSize": 20,
+    "proxyCountry": "US",
+    "proxyTtl": 10,
+    "diurnal": "us-eastern"
   },
   "traffic": {
     "formats": ["banner"],

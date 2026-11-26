@@ -51,10 +51,15 @@ import {
 /* Constants                                                                  */
 /* -------------------------------------------------------------------------- */
 
+/*
+ * Standard in-app banner sizes (IAB). 320x50 leaderboard, 300x250 MREC,
+ * 320x100 medium. 320x480 is a portrait/interstitial format, not an
+ * in-app banner, so it is not in the default set.
+ */
 const BANNER_SIZES = [
     [320, 50],
     [300, 250],
-    [320, 480],
+    [320, 100],
 ];
 
 const BANNER_MIMES = [
@@ -297,11 +302,16 @@ const DEFAULT_TMAX = 500;
  * HTTP request timeout for sendAuction/fireImpression.
  *
  * The proxy pool adds ~1.5s of latency per request (CONNECT tunnel + TLS
- * handshake through residential proxy).  The body tmax (DEFAULT_TMAX) is
- * what the exchange sees; the HTTP timeout must be higher to avoid
- * undici timing out before the proxy round-trip completes.
+ * handshake through residential proxy), and a cold residential exit can
+ * take several more seconds to answer. The body tmax (DEFAULT_TMAX) is
+ * what the exchange sees; the HTTP timeout is OUR patience and must be
+ * higher than the worst realistic proxy round-trip.
+ *
+ * 20s is the hard cap (enforced by a single AbortController). undici's
+ * own headersTimeout/bodyTimeout are set below it as a second safety
+ * net, so a stalled tunnel cannot outlive the budget.
  */
-const HTTP_TIMEOUT_MS = 10000;
+const HTTP_TIMEOUT_MS = 20000;
 
 const DEFAULT_CURRENCY = 'USD';
 
@@ -1306,35 +1316,6 @@ function normalizeBannerSize(size) {
     return [width, height];
 }
 
-/**
- * Scale standard banner sizes proportionally based on display dimensions.
- *
- * Uses a reference display width of 360 px (typical mobile CSS width) so
- * that a device with a 1440 px physical width gets a 4× scale factor.
- *
- * @param {number[][]} bannerSizes - Array of [width, height] pairs
- * @param {object} [display] - Device display info from DEVICE_SPECS
- * @returns {number[][]} Scaled banner sizes
- */
-function scaleBannerSizes(bannerSizes, display) {
-    if (!display || !display.width || !display.height) {
-        return bannerSizes;
-    }
-
-    /*
-     * Reference display width for standard banner sizes.
-     * 360 px is the typical CSS width of a modern smartphone.
-     */
-    const REFERENCE_WIDTH = 360;
-
-    const scale = display.width / REFERENCE_WIDTH;
-
-    return bannerSizes.map(([w, h]) => [
-        Math.round(w * scale),
-        Math.round(h * scale),
-    ]);
-}
-
 function buildBanner(
     width,
     height,
@@ -1352,28 +1333,60 @@ function buildBanner(
             height,
         ]);
 
+    /*
+     * The configured size list is the source of truth for what this slot
+     * accepts, and the main w/h must be one of them: a DSP that bids on
+     * 320x50 should not see a main size of 1280x200.
+     *
+     * (The old code scaled the standard sizes by the physical display
+     * width — 320x50 on a 1440px phone became 1280x200 — producing
+     * non-standard sizes that no DSP creative matches.)
+     */
+    const configuredSizes =
+        Array.isArray(traffic?.bannerSizes)
+            ? traffic.bannerSizes
+                .map((entry) => normalizeBannerSize(entry))
+                .filter(Boolean)
+            : [];
+
+    const pool =
+        configuredSizes.length > 0
+            ? configuredSizes
+            : BANNER_SIZES;
+
     const selected =
         explicit ||
         configured ||
-        pick(scaleBannerSizes(BANNER_SIZES, display));
+        pick(pool);
 
     const w = selected[0];
     const h = selected[1];
 
     /*
-     * Banner formats — must be defined before the banner object so that
-     * `format` can reference it in the initial object construction.
+     * Banner formats — the sizes this slot accepts. Must include the
+     * main w/h so the request is internally consistent.
      *
-     * Falls back to bannerSizes (array of [w, h]) when bannerFormats isn't set.
+     * bannerFormats wins when set; otherwise bannerSizes; otherwise the
+     * standard set.
      */
-    const formats =
+    const formatSource =
         Array.isArray(traffic?.bannerFormats) &&
         traffic.bannerFormats.length > 0
             ? traffic.bannerFormats
-            : Array.isArray(traffic?.bannerSizes) &&
-              traffic.bannerSizes.length > 0
-                ? traffic.bannerSizes
-                : null;
+            : configuredSizes.length > 0
+                ? configuredSizes
+                : BANNER_SIZES;
+
+    const formats =
+        formatSource
+            .map((entry) => normalizeBannerSize(entry))
+            .filter(Boolean);
+
+    if (
+        !formats.some(([fw, fh]) => fw === w && fh === h)
+    ) {
+        formats.push([w, h]);
+    }
 
     const banner = {
         w,
@@ -1417,10 +1430,8 @@ function buildBanner(
      * Only include format when there are actual format entries.
      * An empty [] is rejected by the validator.
      */
-    if (formats && formats.length > 0) {
+    if (formats.length > 0) {
         banner.format = formats
-            .map((entry) => normalizeBannerSize(entry))
-            .filter(Boolean)
             .map(([fw, fh]) => ({ w: fw, h: fh }));
     }
 
@@ -1697,6 +1708,10 @@ function buildSchain(
         /*
          * Prepend the SSP node so the chain reads:
          *   [SSP → publisher intermediaries → original seller]
+         *
+         * When the app's own chain already starts with the same node
+         * (e.g. Screencore's own inventory, where the SSP IS the seller),
+         * prepending would duplicate it — skip the prepend in that case.
          */
         const sspNode = {
             asi: 'screencore.io',
@@ -1707,6 +1722,12 @@ function buildSchain(
                 ? { rid: requestId }
                 : {}),
         };
+
+        const first = configured.nodes[0];
+        const alreadyFirst =
+            first &&
+            first.asi === sspNode.asi &&
+            String(first.sid) === sspNode.sid;
 
         /*
          * Attach rid to the last (original seller) node.
@@ -1735,7 +1756,9 @@ function buildSchain(
                     ? 0
                     : 1,
 
-            nodes: [sspNode, ...downstreamNodes],
+            nodes: alreadyFirst
+                ? downstreamNodes
+                : [sspNode, ...downstreamNodes],
         };
     }
 
@@ -2495,6 +2518,20 @@ function buildAuctionRequest({
         };
     }
 
+    /*
+     * SupplyChain. The exchange's own captured traffic carries it at
+     * source.ext.schain, so that is the default; set
+     * traffic.schainLocation = 'source' to use the spec position
+     * (source.schain) instead.
+     */
+    const schain =
+        buildSchain(
+            traffic,
+            publisherId,
+            requestId,
+            selectedApp,
+        );
+
     const request = {
         id: requestId,
 
@@ -2573,16 +2610,15 @@ function buildAuctionRequest({
             tid: requestId,
 
             /*
-             * SupplyChain lives at source.schain — the top-level property
-             * on source, not nested under ext.
+             * SupplyChain. Default location is source.ext.schain — where
+             * the exchange's own traffic carries it. traffic.schainLocation
+             * = 'source' moves it to the spec position source.schain.
              */
-            // schain:
-            //     buildSchain(
-            //         traffic,
-            //         publisherId,
-            //         requestId,
-            //         selectedApp,
-            //     ),
+            ...(
+                traffic?.schainLocation === 'source'
+                    ? { schain }
+                    : { ext: { schain } }
+            ),
 
         },
 
@@ -2917,6 +2953,15 @@ async function sendAuction(
              * impression pixels. fetch() cannot take a per-request
              * dispatcher, so this path uses undici directly.
              */
+            /*
+             * The AbortController at timeoutMs is the single hard cap.
+             * undici's own timers are a second safety net set strictly
+             * below it (75% for headers, 25% for body), so even if the
+             * abort signal fails to interrupt a stalled tunnel, the
+             * sub-timeouts cannot outlive the budget. (The old code set
+             * both to timeoutMs, allowing a headers+body stall of up to
+             * 2x the budget.)
+             */
             const result =
                 await undiciRequest(
                     auctionUrl,
@@ -2925,8 +2970,8 @@ async function sendAuction(
                         headers,
                         body: JSON.stringify(body),
                         dispatcher,
-                        headersTimeout: timeoutMs,
-                        bodyTimeout: timeoutMs,
+                        headersTimeout: Math.floor(timeoutMs * 0.75),
+                        bodyTimeout: Math.floor(timeoutMs * 0.25),
                         signal: controller.signal,
                     },
                 );
@@ -3377,8 +3422,8 @@ async function fireImpression(
                         method: 'GET',
                         headers: requestHeaders,
                         ...(dispatcher ? { dispatcher } : {}),
-                        headersTimeout: timeoutMs,
-                        bodyTimeout: timeoutMs,
+                        headersTimeout: Math.floor(timeoutMs * 0.75),
+                        bodyTimeout: Math.floor(timeoutMs * 0.25),
                         signal: controller.signal,
                     },
                 );
