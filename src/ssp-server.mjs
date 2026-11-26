@@ -1142,6 +1142,20 @@ async function main() {
 
       if (winnable) stats.winnable += 1;
 
+      /*
+       * Random bidfloor in [cpmRange.min, cpmRange.max] per request.
+       *
+       * Scanning the floor range reveals the DSP's true bid value: the floor
+       * at which it stops bidding bounds what it is willing to pay. Rounded
+       * to the cent. (The `winnable` flag above is kept for stats/logging
+       * only; it no longer selects the floor.)
+       */
+      const floorLo = Math.min(bidFloorWin, bidFloorLose);
+      const floorHi = Math.max(bidFloorWin, bidFloorLose);
+      const bidfloor =
+          Math.round((floorLo + Math.random() * (floorHi - floorLo)) * 100) /
+          100;
+
       const body = buildAuctionRequest({
         ua,
         ip,
@@ -1150,7 +1164,7 @@ async function main() {
         publisherId: selectedApp.publisherId,
         selectedApp,
         format: nextFormat(),
-        bidfloor: winnable ? bidFloorWin : bidFloorLose,
+        bidfloor,
         geoMeta: {
           isp: endpoint.isp,
           metro: endpoint.metro,
