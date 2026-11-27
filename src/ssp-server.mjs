@@ -85,6 +85,9 @@ Options:
   --no-imp                Disable impression tracking
   --seller ID             Use a single publisher ID
   --max-in-flight N       Maximum concurrent attempts
+  --diurnal MODE          QPS modulation: 'flat' (constant QPS), 'us-eastern',
+                          'us-central' (daytime-peak curve), or a number 0..1
+                          (fixed multiplier). Overrides config load.diurnal.
   --log-body [FILE]       Write each request body as JSONL. Use '-' for stdout.
                           Default FILE when omitted: logs/bodies.jsonl
   --log-body-limit N      Maximum bodies to write. Default: 100
@@ -175,6 +178,7 @@ function parseArgs(argv) {
     '--seller',
     '--max-in-flight',
     '--port',
+    '--diurnal',
     '--log-body',
     '--log-body-limit',
   ]);
@@ -496,7 +500,19 @@ async function main() {
   /* Diurnal scheduling pattern                                               */
   /* ------------------------------------------------------------------------ */
 
-  const diurnalMode = cfg.load?.diurnal ?? 'flat';
+  /*
+   * Diurnal QPS modulation. The --diurnal CLI flag overrides the config
+   * (load.diurnal). Accepts 'flat', 'us-eastern', 'us-central', or a number
+   * 0..1 (fixed multiplier). Numeric strings from the CLI are coerced.
+   */
+  const rawDiurnal = args.values.get('--diurnal') ?? cfg.load?.diurnal ?? 'flat';
+
+  const diurnalMode =
+      typeof rawDiurnal === 'string' &&
+      rawDiurnal.trim() !== '' &&
+      !Number.isNaN(Number(rawDiurnal))
+          ? Number(rawDiurnal)
+          : rawDiurnal;
 
   /**
    * Whole local hour (0-23) in the given IANA time zone.
@@ -524,6 +540,11 @@ async function main() {
    * A numeric value (0..1) overrides the curve for the entire run.
    */
   function diurnalMultiplier(now = new Date()) {
+    // 'flat' means a constant QPS (no time-of-day modulation).
+    if (diurnalMode === 'flat') {
+      return 1;
+    }
+
     if (typeof diurnalMode === 'number' && diurnalMode >= 0 && diurnalMode <= 1) {
       return diurnalMode;
     }
