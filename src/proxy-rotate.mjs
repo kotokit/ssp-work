@@ -198,10 +198,38 @@ export class ProxyRotationPool {
     }
 
     /*
-     * Build dispatchers for resolved sessions. We create one dispatcher per
-     * session so each maintains its own persistent connection to the proxy.
+     * Deduplicate by exit IP. Proxy-Cheap assigns the same residential IP to
+     * multiple session IDs (we observed one "hot" IP serving ~30% of
+     * sessions regardless of pool size). Without dedup, round-robin would
+     * push a disproportionate share of traffic through that IP — a per-IP
+     * rate pattern that reads as a bot signal. Keeping only the first
+     * session per IP makes the pool uniform: every request exits from a
+     * distinct IP.
      */
+    const seenIps = new Set();
+    const uniqueSessions = [];
+
     for (const session of resolved) {
+      if (session.ip && !seenIps.has(session.ip)) {
+        seenIps.add(session.ip);
+        uniqueSessions.push(session);
+      }
+    }
+
+    const dropped = resolved.length - uniqueSessions.length;
+
+    if (dropped > 0) {
+      console.log(
+        `  proxy rotation pool: kept ${uniqueSessions.length} unique-IP session(s), ` +
+        `dropped ${dropped} duplicate-IP session(s)`,
+      );
+    }
+
+    /*
+     * Build dispatchers for the unique-IP sessions. We create one dispatcher
+     * per session so each maintains its own persistent connection to the proxy.
+     */
+    for (const session of uniqueSessions) {
       session.dispatcher = new ProxyAgent({
         uri: session.proxyUrl,
         connections: 1,
@@ -212,9 +240,9 @@ export class ProxyRotationPool {
     }
 
     const pool = {
-      _sessions: resolved,
+      _sessions: uniqueSessions,
       _index: 0,
-      _size: resolved.length,
+      _size: uniqueSessions.length,
 
       /**
        * Return the next session (round-robin) for the next auction request.
