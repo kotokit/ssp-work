@@ -589,10 +589,28 @@ async function main() {
    * publisher, categories and supply chain, so requests look like the
    * publisher's genuine traffic spread instead of one fixed app repeated.
    */
+  /*
+   * Optional bundle filter: when traffic.onlyBundles is a non-empty list,
+   * only those app fixtures are used (for targeted demand testing).
+   */
+  const onlyBundles =
+      Array.isArray(cfg.traffic.onlyBundles) &&
+      cfg.traffic.onlyBundles.length > 0
+          ? new Set(cfg.traffic.onlyBundles)
+          : null;
+
   const traffic = {
     ...cfg.traffic,
-    apps: APP_FIXTURES,
+    apps: onlyBundles
+        ? APP_FIXTURES.filter((app) => onlyBundles.has(app.bundle))
+        : APP_FIXTURES,
   };
+
+  if (onlyBundles && traffic.apps.length === 0) {
+    throw new Error(
+        `onlyBundles matched no app fixtures: ${[...onlyBundles].join(', ')}`,
+    );
+  }
 
   const bundle = cfg.traffic.bundle ?? APP_FIXTURES[0].bundle;
   const appName = cfg.traffic.appName ?? APP_FIXTURES[0].name;

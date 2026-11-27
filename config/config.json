@@ -18,6 +18,8 @@
 
     "appSource": "fixtures",
 
+    "onlyBundles": ["in.playsimple.wordsearch", "com.weaver.app.prod"],
+
     "schain": false,
 
     "displayManagers": [
